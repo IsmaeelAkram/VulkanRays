@@ -19,7 +19,13 @@ const std::vector<const char*> validationLayers = {
     "VK_LAYER_KHRONOS_validation"
 };
 
-std::chrono::steady_clock::time_point startTime;
+// --- GLOBALS
+std::chrono::steady_clock::time_point startTime; // Needed for rotation
+// Mouse control globals
+float g_pitchAngle = 0.0f;
+float g_yawAngle = 0.0f;
+bool g_dragging = false;
+int g_lastMouseX = 0, g_lastMouseY = 0;
 
 // Utility: check if requested validation layers are available
 bool checkValidationLayerSupport() {
@@ -402,6 +408,16 @@ Mat4 rotationY(float angle) {
     return m;
 }
 
+// Add rotationX helper
+Mat4 rotationX(float angle) {
+    Mat4 m = {};
+    m.m[0] = 1.0f;
+    m.m[5] = cosf(angle); m.m[6] = -sinf(angle);
+    m.m[9] = sinf(angle); m.m[10] = cosf(angle);
+    m.m[15] = 1.0f;
+    return m;
+}
+
 Mat4 mat4_mul(const Mat4& a, const Mat4& b) {
     Mat4 r = {};
     for (int i = 0; i < 4; ++i)
@@ -432,18 +448,12 @@ void createMVPBuffer() {
 }
 
 void updateMVPBuffer() {
-    using namespace std::chrono;
-    float seconds = 0.0f;
-    if (startTime.time_since_epoch().count() != 0) {
-        auto now = steady_clock::now();
-        seconds = duration<float>(now - startTime).count();
-    }
     int w = (int)swapchainExtent.width, h = (int)swapchainExtent.height;
     float aspect = w / (float)h;
     Mat4 proj = perspective(1.0f, aspect, 0.1f, 10.0f);
-    // Camera: move up and back, look at origin
     Mat4 view = lookAt(0, 1.0f, 2.5f, 0, 0, 0, 0, 1, 0);
-    Mat4 model = rotationY(seconds);
+    // Combine yaw (Y) and pitch (X) rotations
+    Mat4 model = mat4_mul(rotationY(g_yawAngle), rotationX(g_pitchAngle));
     Mat4 mvp = mat4_mul(proj, mat4_mul(view, model));
     void* data;
     vkMapMemory(device, mvpBufferMemory, 0, sizeof(Mat4), 0, &data);
@@ -876,8 +886,27 @@ int main(int argc, char** argv) {
             if (event.type == SDL_QUIT) {
                 running = false;
             }
+            // Mouse controls for free rotation
+            else if (event.type == SDL_MOUSEBUTTONDOWN && event.button.button == SDL_BUTTON_LEFT) {
+                g_dragging = true;
+                g_lastMouseX = event.button.x;
+                g_lastMouseY = event.button.y;
+            } else if (event.type == SDL_MOUSEBUTTONUP && event.button.button == SDL_BUTTON_LEFT) {
+                g_dragging = false;
+            } else if (event.type == SDL_MOUSEMOTION && g_dragging) {
+                int dx = event.motion.x - g_lastMouseX;
+                int dy = event.motion.y - g_lastMouseY;
+                g_lastMouseX = event.motion.x;
+                g_lastMouseY = event.motion.y;
+                // Sensitivity: 0.01f radians per pixel
+                g_yawAngle += dx * 0.01f;
+                g_pitchAngle += dy * 0.01f;
+                // Clamp pitch to [-pi/2, pi/2]
+                if (g_pitchAngle > 1.5708f) g_pitchAngle = 1.5708f;
+                if (g_pitchAngle < -1.5708f) g_pitchAngle = -1.5708f;
+            }
         }
-        updateMVPBuffer(); // Animate rotation every frame
+        updateMVPBuffer();
 
         // Acquire image
         uint32_t imageIndex;
