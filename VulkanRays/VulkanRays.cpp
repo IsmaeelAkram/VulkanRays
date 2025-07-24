@@ -7,6 +7,7 @@
 #include <vulkan/vulkan.h>
 #include <set>
 #include <algorithm>
+#include <chrono>
 
 // Include compiled shader files
 #include "triangle.vert.inc"
@@ -17,6 +18,8 @@ const bool enableValidationLayers = true;
 const std::vector<const char*> validationLayers = {
     "VK_LAYER_KHRONOS_validation"
 };
+
+std::chrono::steady_clock::time_point startTime;
 
 // Utility: check if requested validation layers are available
 bool checkValidationLayerSupport() {
@@ -242,6 +245,263 @@ VkShaderModule createShaderModule(const uint32_t* code, size_t size) {
     return module;
 }
 
+// Vertex structure for 3D triangle
+struct Vertex {
+    float pos[3];
+};
+
+VkBuffer vertexBuffer = VK_NULL_HANDLE;
+VkDeviceMemory vertexBufferMemory = VK_NULL_HANDLE;
+// Add index buffer globals for pyramid
+VkBuffer indexBuffer = VK_NULL_HANDLE;
+VkDeviceMemory indexBufferMemory = VK_NULL_HANDLE;
+
+// Helper: Find memory type
+uint32_t findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties) {
+    VkPhysicalDeviceMemoryProperties memProperties;
+    vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProperties);
+    for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++) {
+        if ((typeFilter & (1 << i)) && (memProperties.memoryTypes[i].propertyFlags & properties) == properties) {
+            return i;
+        }
+    }
+    throw std::runtime_error("Failed to find suitable memory type");
+}
+
+void createVertexBuffer() {
+    // 3D pyramid vertices: 4 base corners (y = +0.5), 1 apex (y = -0.5)
+    Vertex vertices[5] = {
+        {{-0.5f, 0.5f, -0.5f}}, // base 0
+        {{ 0.5f, 0.5f, -0.5f}}, // base 1
+        {{ 0.5f, 0.5f,  0.5f}}, // base 2
+        {{-0.5f, 0.5f,  0.5f}}, // base 3
+        {{ 0.0f, -0.5f,  0.0f}}  // apex 4 (now below base)
+    };
+    VkDeviceSize bufferSize = sizeof(vertices);
+
+    VkBufferCreateInfo bufferInfo{};
+    bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bufferInfo.size = bufferSize;
+    bufferInfo.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+    bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    if (vkCreateBuffer(device, &bufferInfo, nullptr, &vertexBuffer) != VK_SUCCESS)
+        throw std::runtime_error("Failed to create vertex buffer");
+
+    VkMemoryRequirements memRequirements;
+    vkGetBufferMemoryRequirements(device, vertexBuffer, &memRequirements);
+
+    VkMemoryAllocateInfo allocInfo{};
+    allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocInfo.allocationSize = memRequirements.size;
+    allocInfo.memoryTypeIndex = findMemoryType(memRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    if (vkAllocateMemory(device, &allocInfo, nullptr, &vertexBufferMemory) != VK_SUCCESS)
+        throw std::runtime_error("Failed to allocate vertex buffer memory");
+
+    vkBindBufferMemory(device, vertexBuffer, vertexBufferMemory, 0);
+
+    void* data;
+    vkMapMemory(device, vertexBufferMemory, 0, bufferSize, 0, &data);
+    memcpy(data, vertices, (size_t)bufferSize);
+    vkUnmapMemory(device, vertexBufferMemory);
+}
+
+// Create index buffer for pyramid
+void createIndexBuffer() {
+    // 6 triangles: 4 sides, 2 base (base CCW as seen from above)
+    uint16_t indices[] = {
+        // Sides
+        0, 1, 4,
+        1, 2, 4,
+        2, 3, 4,
+        3, 0, 4,
+        // Base (two triangles, CCW from above)
+        0, 2, 1,
+        0, 3, 2
+    };
+    VkDeviceSize bufferSize = sizeof(indices);
+
+    VkBufferCreateInfo bufferInfo{};
+    bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bufferInfo.size = bufferSize;
+    bufferInfo.usage = VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
+    bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    if (vkCreateBuffer(device, &bufferInfo, nullptr, &indexBuffer) != VK_SUCCESS)
+        throw std::runtime_error("Failed to create index buffer");
+
+    VkMemoryRequirements memRequirements;
+    vkGetBufferMemoryRequirements(device, indexBuffer, &memRequirements);
+
+    VkMemoryAllocateInfo allocInfo{};
+    allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocInfo.allocationSize = memRequirements.size;
+    allocInfo.memoryTypeIndex = findMemoryType(memRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    if (vkAllocateMemory(device, &allocInfo, nullptr, &indexBufferMemory) != VK_SUCCESS)
+        throw std::runtime_error("Failed to allocate index buffer memory");
+
+    vkBindBufferMemory(device, indexBuffer, indexBufferMemory, 0);
+
+    void* data;
+    vkMapMemory(device, indexBufferMemory, 0, bufferSize, 0, &data);
+    memcpy(data, indices, (size_t)bufferSize);
+    vkUnmapMemory(device, indexBufferMemory);
+}
+
+VkBuffer mvpBuffer = VK_NULL_HANDLE;
+VkDeviceMemory mvpBufferMemory = VK_NULL_HANDLE;
+VkDescriptorSetLayout descriptorSetLayout = VK_NULL_HANDLE;
+VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
+VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
+
+// Simple 4x4 matrix (column-major)
+struct Mat4 {
+    float m[16];
+};
+
+// Minimal perspective matrix (right-handed, OpenGL style)
+Mat4 perspective(float fovy, float aspect, float znear, float zfar) {
+    float f = 1.0f / tanf(fovy * 0.5f);
+    Mat4 mat = {};
+    mat.m[0] = f / aspect;
+    mat.m[5] = f;
+    mat.m[10] = (zfar + znear) / (znear - zfar);
+    mat.m[11] = -1.0f;
+    mat.m[14] = (2.0f * zfar * znear) / (znear - zfar);
+    return mat;
+}
+
+Mat4 lookAt(float eyeX, float eyeY, float eyeZ, float centerX, float centerY, float centerZ, float upX, float upY, float upZ) {
+    float fx = centerX - eyeX, fy = centerY - eyeY, fz = centerZ - eyeZ;
+    float rlf = 1.0f / sqrtf(fx*fx + fy*fy + fz*fz);
+    fx *= rlf; fy *= rlf; fz *= rlf;
+    float sx = fy * upZ - fz * upY;
+    float sy = fz * upX - fx * upZ;
+    float sz = fx * upY - fy * upX;
+    float rls = 1.0f / sqrtf(sx*sx + sy*sy + sz*sz);
+    sx *= rls; sy *= rls; sz *= rls;
+    float ux = sy * fz - sz * fy;
+    float uy = sz * fx - sx * fz;
+    float uz = sx * fy - sy * fx;
+    Mat4 mat = {};
+    mat.m[0] = sx; mat.m[4] = sy; mat.m[8] = sz;  mat.m[12] = 0.0f;
+    mat.m[1] = ux; mat.m[5] = uy; mat.m[9] = uz;  mat.m[13] = 0.0f;
+    mat.m[2] = -fx; mat.m[6] = -fy; mat.m[10] = -fz; mat.m[14] = 0.0f;
+    mat.m[3] = mat.m[7] = mat.m[11] = 0.0f; mat.m[15] = 1.0f;
+    // Translate
+    mat.m[12] = -(sx*eyeX + sy*eyeY + sz*eyeZ);
+    mat.m[13] = -(ux*eyeX + uy*eyeY + uz*eyeZ);
+    mat.m[14] = fx*eyeX + fy*eyeY + fz*eyeZ;
+    return mat;
+}
+
+Mat4 rotationY(float angle) {
+    Mat4 m = {};
+    m.m[0] = cosf(angle); m.m[2] = sinf(angle);
+    m.m[5] = 1.0f;
+    m.m[8] = -sinf(angle); m.m[10] = cosf(angle);
+    m.m[15] = 1.0f;
+    return m;
+}
+
+Mat4 mat4_mul(const Mat4& a, const Mat4& b) {
+    Mat4 r = {};
+    for (int i = 0; i < 4; ++i)
+        for (int j = 0; j < 4; ++j)
+            for (int k = 0; k < 4; ++k)
+                r.m[i + j*4] += a.m[i + k*4] * b.m[k + j*4];
+    return r;
+}
+
+void createMVPBuffer() {
+    VkDeviceSize bufferSize = sizeof(Mat4);
+    VkBufferCreateInfo bufferInfo{};
+    bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bufferInfo.size = bufferSize;
+    bufferInfo.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+    bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    if (vkCreateBuffer(device, &bufferInfo, nullptr, &mvpBuffer) != VK_SUCCESS)
+        throw std::runtime_error("Failed to create MVP buffer");
+    VkMemoryRequirements memRequirements;
+    vkGetBufferMemoryRequirements(device, mvpBuffer, &memRequirements);
+    VkMemoryAllocateInfo allocInfo{};
+    allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocInfo.allocationSize = memRequirements.size;
+    allocInfo.memoryTypeIndex = findMemoryType(memRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    if (vkAllocateMemory(device, &allocInfo, nullptr, &mvpBufferMemory) != VK_SUCCESS)
+        throw std::runtime_error("Failed to allocate MVP buffer memory");
+    vkBindBufferMemory(device, mvpBuffer, mvpBufferMemory, 0);
+}
+
+void updateMVPBuffer() {
+    using namespace std::chrono;
+    float seconds = 0.0f;
+    if (startTime.time_since_epoch().count() != 0) {
+        auto now = steady_clock::now();
+        seconds = duration<float>(now - startTime).count();
+    }
+    int w = (int)swapchainExtent.width, h = (int)swapchainExtent.height;
+    float aspect = w / (float)h;
+    Mat4 proj = perspective(1.0f, aspect, 0.1f, 10.0f);
+    // Camera: move up and back, look at origin
+    Mat4 view = lookAt(0, 1.0f, 2.5f, 0, 0, 0, 0, 1, 0);
+    Mat4 model = rotationY(seconds);
+    Mat4 mvp = mat4_mul(proj, mat4_mul(view, model));
+    void* data;
+    vkMapMemory(device, mvpBufferMemory, 0, sizeof(Mat4), 0, &data);
+    memcpy(data, &mvp, sizeof(Mat4));
+    vkUnmapMemory(device, mvpBufferMemory);
+}
+
+void createDescriptorSetLayout() {
+    VkDescriptorSetLayoutBinding uboLayoutBinding{};
+    uboLayoutBinding.binding = 0;
+    uboLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    uboLayoutBinding.descriptorCount = 1;
+    uboLayoutBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+    uboLayoutBinding.pImmutableSamplers = nullptr;
+    VkDescriptorSetLayoutCreateInfo layoutInfo{};
+    layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    layoutInfo.bindingCount = 1;
+    layoutInfo.pBindings = &uboLayoutBinding;
+    if (vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &descriptorSetLayout) != VK_SUCCESS)
+        throw std::runtime_error("Failed to create descriptor set layout");
+}
+
+void createDescriptorPool() {
+    VkDescriptorPoolSize poolSize{};
+    poolSize.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    poolSize.descriptorCount = 1;
+    VkDescriptorPoolCreateInfo poolInfo{};
+    poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    poolInfo.poolSizeCount = 1;
+    poolInfo.pPoolSizes = &poolSize;
+    poolInfo.maxSets = 1;
+    if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &descriptorPool) != VK_SUCCESS)
+        throw std::runtime_error("Failed to create descriptor pool");
+}
+
+void createDescriptorSet() {
+    VkDescriptorSetAllocateInfo allocInfo{};
+    allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    allocInfo.descriptorPool = descriptorPool;
+    allocInfo.descriptorSetCount = 1;
+    allocInfo.pSetLayouts = &descriptorSetLayout;
+    if (vkAllocateDescriptorSets(device, &allocInfo, &descriptorSet) != VK_SUCCESS)
+        throw std::runtime_error("Failed to allocate descriptor set");
+    VkDescriptorBufferInfo bufferInfo{};
+    bufferInfo.buffer = mvpBuffer;
+    bufferInfo.offset = 0;
+    bufferInfo.range = sizeof(Mat4);
+    VkWriteDescriptorSet descriptorWrite{};
+    descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    descriptorWrite.dstSet = descriptorSet;
+    descriptorWrite.dstBinding = 0;
+    descriptorWrite.dstArrayElement = 0;
+    descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    descriptorWrite.descriptorCount = 1;
+    descriptorWrite.pBufferInfo = &bufferInfo;
+    vkUpdateDescriptorSets(device, 1, &descriptorWrite, 0, nullptr);
+}
+
 void createGraphicsPipeline() {
     VkShaderModule vertModule = createShaderModule(
         reinterpret_cast<const uint32_t*>(triangle_vert_spv), triangle_vert_spv_len);
@@ -262,8 +522,22 @@ void createGraphicsPipeline() {
 
     VkPipelineShaderStageCreateInfo stages[] = { vertStage, fragStage };
 
+    // Vertex input binding/attribute for 3D position
+    VkVertexInputBindingDescription bindingDesc{};
+    bindingDesc.binding = 0;
+    bindingDesc.stride = sizeof(Vertex);
+    bindingDesc.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+    VkVertexInputAttributeDescription attrDesc{};
+    attrDesc.binding = 0;
+    attrDesc.location = 0;
+    attrDesc.format = VK_FORMAT_R32G32B32_SFLOAT;
+    attrDesc.offset = offsetof(Vertex, pos);
     VkPipelineVertexInputStateCreateInfo vertexInput{};
     vertexInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    vertexInput.vertexBindingDescriptionCount = 1;
+    vertexInput.pVertexBindingDescriptions = &bindingDesc;
+    vertexInput.vertexAttributeDescriptionCount = 1;
+    vertexInput.pVertexAttributeDescriptions = &attrDesc;
 
     VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
     inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
@@ -310,6 +584,8 @@ void createGraphicsPipeline() {
 
     VkPipelineLayoutCreateInfo layoutInfo{};
     layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    layoutInfo.setLayoutCount = 1;
+    layoutInfo.pSetLayouts = &descriptorSetLayout;
     if (vkCreatePipelineLayout(device, &layoutInfo, nullptr, &pipelineLayout) != VK_SUCCESS)
         throw std::runtime_error("Failed to create pipeline layout");
 
@@ -511,7 +787,14 @@ void createCommandBuffers() {
 
         vkCmdBeginRenderPass(commandBuffers[i], &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
         vkCmdBindPipeline(commandBuffers[i], VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
-        vkCmdDraw(commandBuffers[i], 3, 1, 0, 0);
+        VkBuffer vertexBuffers[] = { vertexBuffer };
+        VkDeviceSize offsets[] = { 0 };
+        vkCmdBindVertexBuffers(commandBuffers[i], 0, 1, vertexBuffers, offsets);
+        // Bind index buffer for pyramid
+        vkCmdBindIndexBuffer(commandBuffers[i], indexBuffer, 0, VK_INDEX_TYPE_UINT16);
+        vkCmdBindDescriptorSets(commandBuffers[i], VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &descriptorSet, 0, nullptr);
+        // Draw indexed (18 indices)
+        vkCmdDrawIndexed(commandBuffers[i], 18, 1, 0, 0, 0);
         vkCmdEndRenderPass(commandBuffers[i]);
         vkEndCommandBuffer(commandBuffers[i]);
     }
@@ -552,9 +835,16 @@ int main(int argc, char** argv) {
     createSwapchain(surface, window);
     createImageViews();
     createRenderPass();
+    createDescriptorSetLayout();
     createGraphicsPipeline();
     createFramebuffers();
     createCommandPool();
+    createVertexBuffer();
+    createIndexBuffer();
+    createMVPBuffer();
+    createDescriptorPool();
+    createDescriptorSet();
+    updateMVPBuffer();
     createCommandBuffers();
 
 
@@ -578,6 +868,7 @@ int main(int argc, char** argv) {
     std::cout << "device: " << device << ", swapchain: " << swapchain
               << ", graphicsQueue: " << graphicsQueue << ", presentQueue: " << presentQueue << std::endl;
 
+    startTime = std::chrono::steady_clock::now();
     bool running = true;
     while (running) {
         SDL_Event event;
@@ -586,6 +877,7 @@ int main(int argc, char** argv) {
                 running = false;
             }
         }
+        updateMVPBuffer(); // Animate rotation every frame
 
         // Acquire image
         uint32_t imageIndex;
