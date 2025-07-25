@@ -7,6 +7,8 @@
 #include "VulkanBuffer.h"
 #include <chrono>
 #include <vector>
+#include <memory>
+#include "RenderObject.h"
 // ImGui forward declarations
 struct ImGui_ImplVulkan_InitInfo;
 
@@ -22,11 +24,7 @@ private:
     VulkanSwapchain* swapchain = nullptr;
     VulkanPipeline* pipeline = nullptr; // For triangles (pyramid)
     VulkanPipeline* gridPipeline = nullptr; // For lines (grid)
-    VulkanBuffer* vertexBuffer = nullptr;
-    VulkanBuffer* indexBuffer = nullptr;
     VulkanBuffer* mvpBuffer = nullptr;
-    VulkanBuffer* gridVertexBuffer = nullptr;
-    VulkanBuffer* gridIndexBuffer = nullptr;
     VkDescriptorSetLayout descriptorSetLayout = VK_NULL_HANDLE;
     VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
     VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
@@ -64,6 +62,9 @@ private:
     double frameAccumulator = 0.0;
     int frameCount = 0;
 
+    // Modular render objects
+    std::vector<std::unique_ptr<RenderObject>> renderObjects;
+
     void mainLoop();
     void handleEvents(bool& running);
     void createDescriptorSetLayout();
@@ -71,7 +72,6 @@ private:
     void createDescriptorSet();
     void updateMVPBuffer();
     void createBuffers();
-    void createGridBuffers();
     void createRenderPass();
     void createFramebuffers();
     void createCommandPool();

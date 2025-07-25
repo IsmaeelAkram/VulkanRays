@@ -6,11 +6,7 @@
 #include "imgui.h"
 #include "backends/imgui_impl_sdl2.h"
 #include "backends/imgui_impl_vulkan.h"
-
-struct Vertex {
-    float pos[3];
-    float color[3];
-};
+#include "RenderObject.h"
 
 VulkanApp::VulkanApp() {}
 VulkanApp::~VulkanApp() {
@@ -18,11 +14,6 @@ VulkanApp::~VulkanApp() {
         vkDeviceWaitIdle(vkDevice->getDevice());
     }
     cleanupVulkanResources();
-    if (vertexBuffer) { vertexBuffer->destroy(); delete vertexBuffer; vertexBuffer = nullptr; }
-    if (indexBuffer) { indexBuffer->destroy(); delete indexBuffer; indexBuffer = nullptr; }
-    if (mvpBuffer) { mvpBuffer->destroy(); delete mvpBuffer; mvpBuffer = nullptr; }
-    if (gridVertexBuffer) { gridVertexBuffer->destroy(); delete gridVertexBuffer; gridVertexBuffer = nullptr; }
-    if (gridIndexBuffer) { gridIndexBuffer->destroy(); delete gridIndexBuffer; gridIndexBuffer = nullptr; }
     if (pipeline) delete pipeline;
     if (gridPipeline) delete gridPipeline;
     if (swapchain) delete swapchain;
@@ -119,90 +110,54 @@ int VulkanApp::run() {
 }
 
 void VulkanApp::createBuffers() {
-    // Pyramid vertices (base at y=0, tip at y=1)
-    float s = 1.0f;
-    Vertex vertices[5] = {
-        {{-0.5f * s, 0.0f, -0.5f * s}, {1.0f, 0.0f, 0.0f}},
-        {{ 0.5f * s, 0.0f, -0.5f * s}, {0.0f, 1.0f, 0.0f}},
-        {{ 0.5f * s, 0.0f,  0.5f * s}, {0.0f, 0.0f, 1.0f}},
-        {{-0.5f * s, 0.0f,  0.5f * s}, {1.0f, 1.0f, 0.0f}},
-        {{ 0.0f, -1.0f * s,  0.0f}, {1.0f, 1.0f, 1.0f}} // Tip moved to y = -1.0f * s
-    };
-    uint16_t indices[] = {
-        0, 1, 4, 1, 2, 4, 2, 3, 4, 3, 0, 4, 0, 2, 1, 0, 3, 2
-    };
-    VkDeviceSize vsize = sizeof(vertices);
-    VkDeviceSize isize = sizeof(indices);
-    vertexBuffer = new VulkanBuffer(
-        *vkDevice,
-        vkDevice->getPhysicalDevice(),
-        vsize,
-        VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
-    );
-    vertexBuffer->uploadData(vertices, vsize);
-    indexBuffer = new VulkanBuffer(
-        *vkDevice,
-        vkDevice->getPhysicalDevice(),
-        isize,
-        VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
-    );
-    indexBuffer->uploadData(indices, isize);
-    mvpBuffer = new VulkanBuffer(
-        *vkDevice,
-        vkDevice->getPhysicalDevice(),
-        sizeof(Mat4),
-        VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
-    );
-    createGridBuffers();
+    // Modular: create all render objects
+    renderObjects.clear();
+    renderObjects.push_back(std::make_unique<GridObject>(20, 0.5f));
+    // Create 3 pyramids side by side
+    auto pyramid1 = std::make_unique<PyramidObject>();
+    pyramid1->setPosition(-1.5f, 0.0f, 0.0f);
+    auto pyramid2 = std::make_unique<PyramidObject>();
+    pyramid2->setPosition(0.0f, 0.0f, 0.0f);
+    auto pyramid3 = std::make_unique<PyramidObject>();
+    pyramid3->setPosition(1.5f, 0.0f, 0.0f);
+    renderObjects.push_back(std::move(pyramid1));
+    renderObjects.push_back(std::move(pyramid2));
+    renderObjects.push_back(std::move(pyramid3));
+    for (auto& obj : renderObjects) {
+        obj->createBuffers(*vkDevice, vkDevice->getPhysicalDevice());
+    }
 }
 
-void VulkanApp::createGridBuffers() {
-    // Create a grid in the XZ plane, centered at origin, y=-0.001 to avoid z-fighting
-    constexpr int gridSize = 20;
-    constexpr float gridSpacing = 0.5f;
-    constexpr int numLines = gridSize * 2 + 1;
-    constexpr float gridY = -0.001f; // Offset grid slightly below y=0
-    std::vector<Vertex> gridVertices;
-    std::vector<uint16_t> gridIndices;
-    // Lines parallel to X (varying Z)
-    for (int i = -gridSize; i <= gridSize; ++i) {
-        float z = i * gridSpacing;
-        gridVertices.push_back({{-gridSize * gridSpacing, gridY, z}, {0.5f, 0.5f, 0.5f}});
-        gridVertices.push_back({{ gridSize * gridSpacing, gridY, z}, {0.5f, 0.5f, 0.5f}});
-        uint16_t idx = (uint16_t)gridVertices.size();
-        gridIndices.push_back(idx - 2);
-        gridIndices.push_back(idx - 1);
+void VulkanApp::createDescriptorSet() {
+    for (auto& obj : renderObjects) {
+        obj->mvpBuffer = new VulkanBuffer(
+            *vkDevice,
+            vkDevice->getPhysicalDevice(),
+            sizeof(Mat4),
+            VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+        );
+        VkDescriptorSetAllocateInfo allocInfo{};
+        allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        allocInfo.descriptorPool = descriptorPool;
+        allocInfo.descriptorSetCount = 1;
+        allocInfo.pSetLayouts = &descriptorSetLayout;
+        if (vkAllocateDescriptorSets(vkDevice->getDevice(), &allocInfo, &obj->descriptorSet) != VK_SUCCESS)
+            throw std::runtime_error("Failed to allocate descriptor set");
+        VkDescriptorBufferInfo bufferInfo{};
+        bufferInfo.buffer = obj->mvpBuffer->getBuffer();
+        bufferInfo.offset = 0;
+        bufferInfo.range = sizeof(Mat4);
+        VkWriteDescriptorSet descriptorWrite{};
+        descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        descriptorWrite.dstSet = obj->descriptorSet;
+        descriptorWrite.dstBinding = 0;
+        descriptorWrite.dstArrayElement = 0;
+        descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        descriptorWrite.descriptorCount = 1;
+        descriptorWrite.pBufferInfo = &bufferInfo;
+        vkUpdateDescriptorSets(vkDevice->getDevice(), 1, &descriptorWrite, 0, nullptr);
     }
-    // Lines parallel to Z (varying X)
-    for (int i = -gridSize; i <= gridSize; ++i) {
-        float x = i * gridSpacing;
-        gridVertices.push_back({{x, gridY, -gridSize * gridSpacing}, {0.5f, 0.5f, 0.5f}});
-        gridVertices.push_back({{x, gridY,  gridSize * gridSpacing}, {0.5f, 0.5f, 0.5f}});
-        uint16_t idx = (uint16_t)gridVertices.size();
-        gridIndices.push_back(idx - 2);
-        gridIndices.push_back(idx - 1);
-    }
-    VkDeviceSize vsize = sizeof(Vertex) * gridVertices.size();
-    VkDeviceSize isize = sizeof(uint16_t) * gridIndices.size();
-    gridVertexBuffer = new VulkanBuffer(
-        *vkDevice,
-        vkDevice->getPhysicalDevice(),
-        vsize,
-        VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
-    );
-    gridVertexBuffer->uploadData(gridVertices.data(), vsize);
-    gridIndexBuffer = new VulkanBuffer(
-        *vkDevice,
-        vkDevice->getPhysicalDevice(),
-        isize,
-        VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
-    );
-    gridIndexBuffer->uploadData(gridIndices.data(), isize);
 }
 
 void VulkanApp::mainLoop() {
@@ -212,7 +167,14 @@ void VulkanApp::mainLoop() {
     auto lastTime = std::chrono::high_resolution_clock::now();
     while (running) {
         handleEvents(running);
-        updateMVPBuffer();
+        // Camera movement (was in updateMVPBuffer, now here)
+        float moveSpeed = 0.05f;
+        float forward[3] = { sinf(camYaw) * cosf(camPitch), sinf(camPitch), -cosf(camYaw) * cosf(camPitch) };
+        float right[3] = { cosf(camYaw), 0, sinf(camYaw) };
+        if (keyW) { camX += forward[0] * moveSpeed; camY += forward[1] * moveSpeed; camZ += forward[2] * moveSpeed; }
+        if (keyS) { camX -= forward[0] * moveSpeed; camY -= forward[1] * moveSpeed; camZ -= forward[2] * moveSpeed; }
+        if (keyA) { camX -= right[0] * moveSpeed; camZ -= right[2] * moveSpeed; }
+        if (keyD) { camX += right[0] * moveSpeed; camZ += right[2] * moveSpeed; }
         // FPS calculation
         auto now = std::chrono::high_resolution_clock::now();
         double delta = std::chrono::duration<double>(now - lastTime).count();
@@ -256,24 +218,13 @@ void VulkanApp::mainLoop() {
         rpInfo.clearValueCount = 1;
         rpInfo.pClearValues = &clearColor;
         vkCmdBeginRenderPass(commandBuffers[imageIndex], &rpInfo, VK_SUBPASS_CONTENTS_INLINE);
-        // Draw grid and pyramid
-        if (gridVertexBuffer && gridIndexBuffer && gridPipeline) {
-            VkBuffer gridVbufs[] = { gridVertexBuffer->getBuffer() };
-            VkDeviceSize gridOffsets[] = { 0 };
-            vkCmdBindPipeline(commandBuffers[imageIndex], VK_PIPELINE_BIND_POINT_GRAPHICS, gridPipeline->getGraphicsPipeline());
-            vkCmdBindVertexBuffers(commandBuffers[imageIndex], 0, 1, gridVbufs, gridOffsets);
-            vkCmdBindIndexBuffer(commandBuffers[imageIndex], gridIndexBuffer->getBuffer(), 0, VK_INDEX_TYPE_UINT16);
-            vkCmdBindDescriptorSets(commandBuffers[imageIndex], VK_PIPELINE_BIND_POINT_GRAPHICS, gridPipeline->getPipelineLayout(), 0, 1, &descriptorSet, 0, nullptr);
-            vkCmdDrawIndexed(commandBuffers[imageIndex], 2 * (20 * 2 + 1) * 2, 1, 0, 0, 0);
-        }
-        if (pipeline) {
-            VkBuffer vbufs[] = { vertexBuffer->getBuffer() };
-            VkDeviceSize offsets[] = { 0 };
-            vkCmdBindPipeline(commandBuffers[imageIndex], VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->getGraphicsPipeline());
-            vkCmdBindVertexBuffers(commandBuffers[imageIndex], 0, 1, vbufs, offsets);
-            vkCmdBindIndexBuffer(commandBuffers[imageIndex], indexBuffer->getBuffer(), 0, VK_INDEX_TYPE_UINT16);
-            vkCmdBindDescriptorSets(commandBuffers[imageIndex], VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->getPipelineLayout(), 0, 1, &descriptorSet, 0, nullptr);
-            vkCmdDrawIndexed(commandBuffers[imageIndex], 18, 1, 0, 0, 0);
+        // Modular: draw all render objects
+        for (auto& obj : renderObjects) {
+            VulkanPipeline* usedPipeline = (obj->getTopology() == VulkanPipeline::Topology::Lines) ? gridPipeline : pipeline;
+            if (usedPipeline) {
+                vkCmdBindPipeline(commandBuffers[imageIndex], VK_PIPELINE_BIND_POINT_GRAPHICS, usedPipeline->getGraphicsPipeline());
+                obj->recordDraw(commandBuffers[imageIndex], usedPipeline->getPipelineLayout(), obj->descriptorSet);
+            }
         }
         // ImGui draw
         recordImGui(commandBuffers[imageIndex]);
@@ -361,62 +312,20 @@ void VulkanApp::createDescriptorSetLayout() {
         throw std::runtime_error("Failed to create descriptor set layout");
 }
 void VulkanApp::createDescriptorPool() {
+    size_t numObjects = renderObjects.size();
     VkDescriptorPoolSize poolSize{};
     poolSize.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    poolSize.descriptorCount = 1;
+    poolSize.descriptorCount = static_cast<uint32_t>(numObjects);
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
     poolInfo.poolSizeCount = 1;
     poolInfo.pPoolSizes = &poolSize;
-    poolInfo.maxSets = 1;
+    poolInfo.maxSets = static_cast<uint32_t>(numObjects);
     if (vkCreateDescriptorPool(vkDevice->getDevice(), &poolInfo, nullptr, &descriptorPool) != VK_SUCCESS)
         throw std::runtime_error("Failed to create descriptor pool");
 }
-void VulkanApp::createDescriptorSet() {
-    VkDescriptorSetAllocateInfo allocInfo{};
-    allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-    allocInfo.descriptorPool = descriptorPool;
-    allocInfo.descriptorSetCount = 1;
-    allocInfo.pSetLayouts = &descriptorSetLayout;
-    if (vkAllocateDescriptorSets(vkDevice->getDevice(), &allocInfo, &descriptorSet) != VK_SUCCESS)
-        throw std::runtime_error("Failed to allocate descriptor set");
-    VkDescriptorBufferInfo bufferInfo{};
-    bufferInfo.buffer = mvpBuffer->getBuffer();
-    bufferInfo.offset = 0;
-    bufferInfo.range = sizeof(Mat4);
-    VkWriteDescriptorSet descriptorWrite{};
-    descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    descriptorWrite.dstSet = descriptorSet;
-    descriptorWrite.dstBinding = 0;
-    descriptorWrite.dstArrayElement = 0;
-    descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    descriptorWrite.descriptorCount = 1;
-    descriptorWrite.pBufferInfo = &bufferInfo;
-    vkUpdateDescriptorSets(vkDevice->getDevice(), 1, &descriptorWrite, 0, nullptr);
-}
 void VulkanApp::updateMVPBuffer() {
-    int w = (int)swapchain->getExtent().width, h = (int)swapchain->getExtent().height;
-    float aspect = w / (float)h;
-    Mat4 proj = perspective(1.0f, aspect, 0.1f, 100.0f);
-
-    // Camera movement
-    float moveSpeed = 0.05f;
-    float forward[3] = { sinf(camYaw) * cosf(camPitch), sinf(camPitch), -cosf(camYaw) * cosf(camPitch) };
-    float right[3] = { cosf(camYaw), 0, sinf(camYaw) };
-    if (keyW) { camX += forward[0] * moveSpeed; camY += forward[1] * moveSpeed; camZ += forward[2] * moveSpeed; }
-    if (keyS) { camX -= forward[0] * moveSpeed; camY -= forward[1] * moveSpeed; camZ -= forward[2] * moveSpeed; }
-    if (keyA) { camX -= right[0] * moveSpeed; camZ -= right[2] * moveSpeed; }
-    if (keyD) { camX += right[0] * moveSpeed; camZ += right[2] * moveSpeed; }
-
-    float eyeX = camX, eyeY = camY, eyeZ = camZ;
-    float centerX = camX + forward[0], centerY = camY + forward[1], centerZ = camZ + forward[2];
-    float upX = 0, upY = 1, upZ = 0;
-    Mat4 view = lookAt(eyeX, eyeY, eyeZ, centerX, centerY, centerZ, upX, upY, upZ);
-
-    Mat4 model = {};
-    for (int i = 0; i < 16; ++i) model.m[i] = (i % 5 == 0) ? 1.0f : 0.0f; // Identity
-    Mat4 mvp = mat4_mul(proj, mat4_mul(view, model));
-    mvpBuffer->uploadData(&mvp, sizeof(Mat4));
+    // No-op: all per-object MVP buffer updates are handled in recordCommandBuffer()
 }
 
 void VulkanApp::createRenderPass() {
@@ -512,26 +421,25 @@ void VulkanApp::recordCommandBuffer(VkCommandBuffer cmd, uint32_t imageIndex) {
     rpInfo.clearValueCount = 1;
     rpInfo.pClearValues = &clearColor;
     vkCmdBeginRenderPass(cmd, &rpInfo, VK_SUBPASS_CONTENTS_INLINE);
-    // Draw grid (lines)
-    if (gridVertexBuffer && gridIndexBuffer && gridPipeline) {
-        VkBuffer gridVbufs[] = { gridVertexBuffer->getBuffer() };
-        VkDeviceSize gridOffsets[] = { 0 };
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, gridPipeline->getGraphicsPipeline());
-        vkCmdBindVertexBuffers(cmd, 0, 1, gridVbufs, gridOffsets);
-        vkCmdBindIndexBuffer(cmd, gridIndexBuffer->getBuffer(), 0, VK_INDEX_TYPE_UINT16);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, gridPipeline->getPipelineLayout(), 0, 1, &descriptorSet, 0, nullptr);
-        // Grid has 2*(2*gridSize+1)*2 indices
-        vkCmdDrawIndexed(cmd, 2 * (20 * 2 + 1) * 2, 1, 0, 0, 0);
-    }
-    // Draw pyramid
-    if (pipeline) {
-        VkBuffer vbufs[] = { vertexBuffer->getBuffer() };
-        VkDeviceSize offsets[] = { 0 };
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->getGraphicsPipeline());
-        vkCmdBindVertexBuffers(cmd, 0, 1, vbufs, offsets);
-        vkCmdBindIndexBuffer(cmd, indexBuffer->getBuffer(), 0, VK_INDEX_TYPE_UINT16);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->getPipelineLayout(), 0, 1, &descriptorSet, 0, nullptr);
-        vkCmdDrawIndexed(cmd, 18, 1, 0, 0, 0);
+    // Modular: draw all render objects
+    int w = (int)swapchain->getExtent().width, h = (int)swapchain->getExtent().height;
+    float aspect = w / (float)h;
+    Mat4 proj = perspective(1.0f, aspect, 0.1f, 100.0f);
+    float eyeX = camX, eyeY = camY, eyeZ = camZ;
+    float forward[3] = { sinf(camYaw) * cosf(camPitch), sinf(camPitch), -cosf(camYaw) * cosf(camPitch) };
+    float centerX = camX + forward[0], centerY = camY + forward[1], centerZ = camZ + forward[2];
+    float upX = 0, upY = 1, upZ = 0;
+    Mat4 view = lookAt(eyeX, eyeY, eyeZ, centerX, centerY, centerZ, upX, upY, upZ);
+    for (auto& obj : renderObjects) {
+        VulkanPipeline* usedPipeline = (obj->getTopology() == VulkanPipeline::Topology::Lines) ? gridPipeline : pipeline;
+        if (usedPipeline) {
+            // Per-object MVP
+            Mat4 model = obj->getModelMatrix();
+            Mat4 mvp = mat4_mul(proj, mat4_mul(view, model));
+            obj->mvpBuffer->uploadData(&mvp, sizeof(Mat4));
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, usedPipeline->getGraphicsPipeline());
+            obj->recordDraw(cmd, usedPipeline->getPipelineLayout(), obj->descriptorSet);
+        }
     }
     vkCmdEndRenderPass(cmd);
     vkEndCommandBuffer(cmd);
