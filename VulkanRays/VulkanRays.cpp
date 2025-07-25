@@ -1,4 +1,4 @@
-﻿#define VK_USE_PLATFORM_WIN32_KHR
+﻿//#define VK_USE_PLATFORM_WIN32_KHR
 #define NOMINMAX
 #include <iostream>
 #include <vector>
@@ -254,6 +254,7 @@ VkShaderModule createShaderModule(const uint32_t* code, size_t size) {
 // Vertex structure for 3D triangle
 struct Vertex {
     float pos[3];
+    float color[3];
 };
 
 VkBuffer vertexBuffer = VK_NULL_HANDLE;
@@ -276,12 +277,13 @@ uint32_t findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties) {
 
 void createVertexBuffer() {
     // 3D pyramid vertices: 4 base corners (y = +0.5), 1 apex (y = -0.5)
+    // Assign colors: base0=red, base1=green, base2=blue, base3=yellow, apex=white
     Vertex vertices[5] = {
-        {{-0.5f, 0.5f, -0.5f}}, // base 0
-        {{ 0.5f, 0.5f, -0.5f}}, // base 1
-        {{ 0.5f, 0.5f,  0.5f}}, // base 2
-        {{-0.5f, 0.5f,  0.5f}}, // base 3
-        {{ 0.0f, -0.5f,  0.0f}}  // apex 4 (now below base)
+        {{-0.5f, 0.5f, -0.5f}, {1.0f, 0.0f, 0.0f}}, // base 0 - red
+        {{ 0.5f, 0.5f, -0.5f}, {0.0f, 1.0f, 0.0f}}, // base 1 - green
+        {{ 0.5f, 0.5f,  0.5f}, {0.0f, 0.0f, 1.0f}}, // base 2 - blue
+        {{-0.5f, 0.5f,  0.5f}, {1.0f, 1.0f, 0.0f}}, // base 3 - yellow
+        {{ 0.0f, -0.5f,  0.0f}, {1.0f, 1.0f, 1.0f}}  // apex 4 - white
     };
     VkDeviceSize bufferSize = sizeof(vertices);
 
@@ -399,6 +401,16 @@ Mat4 lookAt(float eyeX, float eyeY, float eyeZ, float centerX, float centerY, fl
     return mat;
 }
 
+// Add rotation axis helpers
+Mat4 rotationX(float angle) {
+    Mat4 m = {};
+    m.m[0] = 1.0f;
+    m.m[5] = cosf(angle); m.m[6] = -sinf(angle);
+    m.m[9] = sinf(angle); m.m[10] = cosf(angle);
+    m.m[15] = 1.0f;
+    return m;
+}
+
 Mat4 rotationY(float angle) {
     Mat4 m = {};
     m.m[0] = cosf(angle); m.m[2] = sinf(angle);
@@ -408,12 +420,11 @@ Mat4 rotationY(float angle) {
     return m;
 }
 
-// Add rotationX helper
-Mat4 rotationX(float angle) {
+Mat4 rotationZ(float angle) {
     Mat4 m = {};
-    m.m[0] = 1.0f;
-    m.m[5] = cosf(angle); m.m[6] = -sinf(angle);
-    m.m[9] = sinf(angle); m.m[10] = cosf(angle);
+    m.m[0] = cosf(angle); m.m[4] = -sinf(angle);
+    m.m[1] = sinf(angle); m.m[5] = cosf(angle);
+    m.m[10] = 1.0f;
     m.m[15] = 1.0f;
     return m;
 }
@@ -452,8 +463,11 @@ void updateMVPBuffer() {
     float aspect = w / (float)h;
     Mat4 proj = perspective(1.0f, aspect, 0.1f, 10.0f);
     Mat4 view = lookAt(0, 1.0f, 2.5f, 0, 0, 0, 0, 1, 0);
-    // Combine yaw (Y) and pitch (X) rotations
-    Mat4 model = mat4_mul(rotationY(g_yawAngle), rotationX(g_pitchAngle));
+    // Combine time-based Y rotation and mouse yaw/pitch
+    float timeSec = std::chrono::duration<float>(std::chrono::steady_clock::now() - startTime).count();
+    float totalYaw = timeSec + g_yawAngle;
+    float pitch = g_pitchAngle;
+    Mat4 model = mat4_mul(rotationY(totalYaw), rotationX(pitch));
     Mat4 mvp = mat4_mul(proj, mat4_mul(view, model));
     void* data;
     vkMapMemory(device, mvpBufferMemory, 0, sizeof(Mat4), 0, &data);
@@ -537,17 +551,21 @@ void createGraphicsPipeline() {
     bindingDesc.binding = 0;
     bindingDesc.stride = sizeof(Vertex);
     bindingDesc.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
-    VkVertexInputAttributeDescription attrDesc{};
-    attrDesc.binding = 0;
-    attrDesc.location = 0;
-    attrDesc.format = VK_FORMAT_R32G32B32_SFLOAT;
-    attrDesc.offset = offsetof(Vertex, pos);
+    VkVertexInputAttributeDescription attrDesc[2] = {};
+    attrDesc[0].binding = 0;
+    attrDesc[0].location = 0;
+    attrDesc[0].format = VK_FORMAT_R32G32B32_SFLOAT;
+    attrDesc[0].offset = offsetof(Vertex, pos);
+    attrDesc[1].binding = 0;
+    attrDesc[1].location = 1;
+    attrDesc[1].format = VK_FORMAT_R32G32B32_SFLOAT;
+    attrDesc[1].offset = offsetof(Vertex, color);
     VkPipelineVertexInputStateCreateInfo vertexInput{};
     vertexInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
     vertexInput.vertexBindingDescriptionCount = 1;
     vertexInput.pVertexBindingDescriptions = &bindingDesc;
-    vertexInput.vertexAttributeDescriptionCount = 1;
-    vertexInput.pVertexAttributeDescriptions = &attrDesc;
+    vertexInput.vertexAttributeDescriptionCount = 2;
+    vertexInput.pVertexAttributeDescriptions = attrDesc;
 
     VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
     inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
