@@ -12,15 +12,27 @@ endif()
 set(VK_SDK "$ENV{VULKAN_SDK}")
 
 # — Gather sources —
-file(GLOB_RECURSE SOURCES VulkanRays/*.cpp VulkanRays/*.h)
+file(GLOB_RECURSE SOURCES VulkanRays/*.cpp VulkanRays/*.h imgui/*.cpp imgui/*.h)
+
+# ImGui sources
+set(IMGUI_SOURCES
+    imgui/imgui.cpp
+    imgui/imgui_draw.cpp
+    imgui/imgui_tables.cpp
+    imgui/imgui_widgets.cpp
+    imgui/imgui_demo.cpp
+    imgui/backends/imgui_impl_sdl2.cpp
+    imgui/backends/imgui_impl_vulkan.cpp
+)
 
 # — Executable —
-add_executable(VulkanRays ${SOURCES})
+add_executable(VulkanRays ${SOURCES} ${IMGUI_SOURCES})
 
 # — Include dirs —
 target_include_directories(VulkanRays PRIVATE
   "${VK_SDK}/Include"
   "${VK_SDK}/Include/SDL2"
+  imgui
 )
 
 # — Link libraries —

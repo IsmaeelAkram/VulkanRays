@@ -7,6 +7,8 @@
 #include "VulkanBuffer.h"
 #include <chrono>
 #include <vector>
+// ImGui forward declarations
+struct ImGui_ImplVulkan_InitInfo;
 
 class VulkanApp {
 public:
@@ -18,10 +20,13 @@ private:
     VulkanInstance* vkInstance = nullptr;
     VulkanDevice* vkDevice = nullptr;
     VulkanSwapchain* swapchain = nullptr;
-    VulkanPipeline* pipeline = nullptr;
+    VulkanPipeline* pipeline = nullptr; // For triangles (pyramid)
+    VulkanPipeline* gridPipeline = nullptr; // For lines (grid)
     VulkanBuffer* vertexBuffer = nullptr;
     VulkanBuffer* indexBuffer = nullptr;
     VulkanBuffer* mvpBuffer = nullptr;
+    VulkanBuffer* gridVertexBuffer = nullptr;
+    VulkanBuffer* gridIndexBuffer = nullptr;
     VkDescriptorSetLayout descriptorSetLayout = VK_NULL_HANDLE;
     VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
     VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
@@ -47,6 +52,21 @@ private:
     std::vector<VkSemaphore> renderFinishedSemaphores;
     std::vector<VkFence> inFlightFences;
 
+    // --- ImGui integration ---
+    VkDescriptorPool imguiPool = VK_NULL_HANDLE;
+    void initImGui();
+    void shutdownImGui();
+    void recordImGui(VkCommandBuffer cmd);
+
+    // --- FPS timing ---
+    double lastFrameTime = 0.0;
+    double fps = 0.0;
+    double frameAccumulator = 0.0;
+    int frameCount = 0;
+
+    // --- Pyramid scale (editable via ImGui) ---
+    float pyramidScale = 1.0f;
+
     void mainLoop();
     void handleEvents(bool& running);
     void createDescriptorSetLayout();
@@ -54,6 +74,7 @@ private:
     void createDescriptorSet();
     void updateMVPBuffer();
     void createBuffers();
+    void createGridBuffers();
     void createRenderPass();
     void createFramebuffers();
     void createCommandPool();

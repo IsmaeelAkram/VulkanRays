@@ -3,7 +3,11 @@
 
 class VulkanPipeline {
 public:
-    VulkanPipeline(VkDevice device, VkExtent2D extent, VkRenderPass renderPass, VkDescriptorSetLayout descriptorSetLayout);
+    enum class Topology {
+        Triangles,
+        Lines
+    };
+    VulkanPipeline(VkDevice device, VkExtent2D extent, VkRenderPass renderPass, VkDescriptorSetLayout descriptorSetLayout, Topology topology = Topology::Triangles);
     ~VulkanPipeline();
     VkPipeline getGraphicsPipeline() const { return graphicsPipeline; }
     VkPipelineLayout getPipelineLayout() const { return pipelineLayout; }

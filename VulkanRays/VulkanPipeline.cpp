@@ -11,7 +11,7 @@ struct Vertex {
     float color[3];
 };
 
-VulkanPipeline::VulkanPipeline(VkDevice device, VkExtent2D extent, VkRenderPass renderPass, VkDescriptorSetLayout descriptorSetLayout)
+VulkanPipeline::VulkanPipeline(VkDevice device, VkExtent2D extent, VkRenderPass renderPass, VkDescriptorSetLayout descriptorSetLayout, Topology topology)
     : device(device) {
     // Vertex input binding and attribute descriptions
     VkVertexInputBindingDescription bindingDescription{};
@@ -39,7 +39,7 @@ VulkanPipeline::VulkanPipeline(VkDevice device, VkExtent2D extent, VkRenderPass 
     // Input assembly
     VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
     inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
-    inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    inputAssembly.topology = (topology == Topology::Triangles) ? VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST : VK_PRIMITIVE_TOPOLOGY_LINE_LIST;
     inputAssembly.primitiveRestartEnable = VK_FALSE;
 
     // Viewport and scissor

@@ -3,6 +3,9 @@
 #include <stdexcept>
 #include "MathUtils.h"
 #include <vector>
+#include "imgui.h"
+#include "backends/imgui_impl_sdl2.h"
+#include "backends/imgui_impl_vulkan.h"
 
 struct Vertex {
     float pos[3];
@@ -18,7 +21,10 @@ VulkanApp::~VulkanApp() {
     if (vertexBuffer) { vertexBuffer->destroy(); delete vertexBuffer; vertexBuffer = nullptr; }
     if (indexBuffer) { indexBuffer->destroy(); delete indexBuffer; indexBuffer = nullptr; }
     if (mvpBuffer) { mvpBuffer->destroy(); delete mvpBuffer; mvpBuffer = nullptr; }
+    if (gridVertexBuffer) { gridVertexBuffer->destroy(); delete gridVertexBuffer; gridVertexBuffer = nullptr; }
+    if (gridIndexBuffer) { gridIndexBuffer->destroy(); delete gridIndexBuffer; gridIndexBuffer = nullptr; }
     if (pipeline) delete pipeline;
+    if (gridPipeline) delete gridPipeline;
     if (swapchain) delete swapchain;
     if (vkDevice) delete vkDevice;
     if (vkInstance) delete vkInstance;
@@ -86,7 +92,7 @@ int VulkanApp::run() {
         std::cerr << "SDL Init Error: " << SDL_GetError() << "\n";
         return 1;
     }
-    window = SDL_CreateWindow("VulkanRays", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 800, 600, SDL_WINDOW_VULKAN | SDL_WINDOW_SHOWN);
+    window = SDL_CreateWindow("VulkanRays", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1280,720, SDL_WINDOW_VULKAN | SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
     if (!window) {
         std::cerr << "SDL_CreateWindow failed\n";
         return 1;
@@ -95,7 +101,6 @@ int VulkanApp::run() {
     vkDevice = new VulkanDevice(vkInstance->getInstance(), vkInstance->getSurface());
     swapchain = new VulkanSwapchain(*vkDevice, vkInstance->getSurface(), window);
     createDescriptorSetLayout();
-    // Create buffers
     createBuffers();
     createDescriptorPool();
     createDescriptorSet();
@@ -104,19 +109,24 @@ int VulkanApp::run() {
     createCommandPool();
     createCommandBuffers();
     createSyncObjects();
-    pipeline = new VulkanPipeline(vkDevice->getDevice(), swapchain->getExtent(), renderPass, descriptorSetLayout); // TODO: Use actual render pass
+    // Create pipelines: one for triangles (pyramid), one for lines (grid)
+    pipeline = new VulkanPipeline(vkDevice->getDevice(), swapchain->getExtent(), renderPass, descriptorSetLayout, VulkanPipeline::Topology::Triangles);
+    gridPipeline = new VulkanPipeline(vkDevice->getDevice(), swapchain->getExtent(), renderPass, descriptorSetLayout, VulkanPipeline::Topology::Lines);
+    initImGui();
     mainLoop();
+    shutdownImGui();
     return 0;
 }
 
 void VulkanApp::createBuffers() {
-    // Pyramid vertices
+    // Pyramid vertices (base at y=0, tip at y=1)
+    float s = pyramidScale;
     Vertex vertices[5] = {
-        {{-0.5f, 0.0f, -0.5f}, {1.0f, 0.0f, 0.0f}},
-        {{ 0.5f, 0.0f, -0.5f}, {0.0f, 1.0f, 0.0f}},
-        {{ 0.5f, 0.0f,  0.5f}, {0.0f, 0.0f, 1.0f}},
-        {{-0.5f, 0.0f,  0.5f}, {1.0f, 1.0f, 0.0f}},
-        {{ 0.0f, 1.0f,  0.0f}, {1.0f, 1.0f, 1.0f}}
+        {{-0.5f * s, 0.0f, -0.5f * s}, {1.0f, 0.0f, 0.0f}},
+        {{ 0.5f * s, 0.0f, -0.5f * s}, {0.0f, 1.0f, 0.0f}},
+        {{ 0.5f * s, 0.0f,  0.5f * s}, {0.0f, 0.0f, 1.0f}},
+        {{-0.5f * s, 0.0f,  0.5f * s}, {1.0f, 1.0f, 0.0f}},
+        {{ 0.0f, -1.0f * s,  0.0f}, {1.0f, 1.0f, 1.0f}} // Tip moved to y = -1.0f * s
     };
     uint16_t indices[] = {
         0, 1, 4, 1, 2, 4, 2, 3, 4, 3, 0, 4, 0, 2, 1, 0, 3, 2
@@ -146,21 +156,142 @@ void VulkanApp::createBuffers() {
         VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
     );
+    createGridBuffers();
+}
+
+void VulkanApp::createGridBuffers() {
+    // Create a grid in the XZ plane, centered at origin, y=-0.001 to avoid z-fighting
+    constexpr int gridSize = 20;
+    constexpr float gridSpacing = 0.5f;
+    constexpr int numLines = gridSize * 2 + 1;
+    constexpr float gridY = -0.001f; // Offset grid slightly below y=0
+    std::vector<Vertex> gridVertices;
+    std::vector<uint16_t> gridIndices;
+    // Lines parallel to X (varying Z)
+    for (int i = -gridSize; i <= gridSize; ++i) {
+        float z = i * gridSpacing;
+        gridVertices.push_back({{-gridSize * gridSpacing, gridY, z}, {0.5f, 0.5f, 0.5f}});
+        gridVertices.push_back({{ gridSize * gridSpacing, gridY, z}, {0.5f, 0.5f, 0.5f}});
+        uint16_t idx = (uint16_t)gridVertices.size();
+        gridIndices.push_back(idx - 2);
+        gridIndices.push_back(idx - 1);
+    }
+    // Lines parallel to Z (varying X)
+    for (int i = -gridSize; i <= gridSize; ++i) {
+        float x = i * gridSpacing;
+        gridVertices.push_back({{x, gridY, -gridSize * gridSpacing}, {0.5f, 0.5f, 0.5f}});
+        gridVertices.push_back({{x, gridY,  gridSize * gridSpacing}, {0.5f, 0.5f, 0.5f}});
+        uint16_t idx = (uint16_t)gridVertices.size();
+        gridIndices.push_back(idx - 2);
+        gridIndices.push_back(idx - 1);
+    }
+    VkDeviceSize vsize = sizeof(Vertex) * gridVertices.size();
+    VkDeviceSize isize = sizeof(uint16_t) * gridIndices.size();
+    gridVertexBuffer = new VulkanBuffer(
+        *vkDevice,
+        vkDevice->getPhysicalDevice(),
+        vsize,
+        VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+    );
+    gridVertexBuffer->uploadData(gridVertices.data(), vsize);
+    gridIndexBuffer = new VulkanBuffer(
+        *vkDevice,
+        vkDevice->getPhysicalDevice(),
+        isize,
+        VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+    );
+    gridIndexBuffer->uploadData(gridIndices.data(), isize);
 }
 
 void VulkanApp::mainLoop() {
     bool running = true;
     size_t imageCount = swapchain->getImages().size();
     uint32_t currentFrame = 0;
+    auto lastTime = std::chrono::high_resolution_clock::now();
+    float lastPyramidScale = pyramidScale;
     while (running) {
         handleEvents(running);
         updateMVPBuffer();
+        // FPS calculation
+        auto now = std::chrono::high_resolution_clock::now();
+        double delta = std::chrono::duration<double>(now - lastTime).count();
+        lastTime = now;
+        frameAccumulator += delta;
+        frameCount++;
+        if (frameAccumulator >= 1.0) {
+            fps = frameCount / frameAccumulator;
+            frameAccumulator = 0.0;
+            frameCount = 0;
+        }
         vkWaitForFences(vkDevice->getDevice(), 1, &inFlightFences[currentFrame], VK_TRUE, UINT64_MAX);
         vkResetFences(vkDevice->getDevice(), 1, &inFlightFences[currentFrame]);
         uint32_t imageIndex;
         vkAcquireNextImageKHR(vkDevice->getDevice(), swapchain->getSwapchain(), UINT64_MAX, imageAvailableSemaphores[currentFrame], VK_NULL_HANDLE, &imageIndex);
         vkResetCommandBuffer(commandBuffers[imageIndex], 0);
+        // Start ImGui frame
+        ImGui_ImplVulkan_NewFrame();
+        ImGui_ImplSDL2_NewFrame(); // No arguments for latest ImGui
+        ImGui::NewFrame();
+        // FPS overlay window
+        ImGui::SetNextWindowPos(ImVec2(10, 10), ImGuiCond_Always);
+        ImGui::SetNextWindowBgAlpha(0.35f);
+        ImGui::Begin("FPS", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav);
+        ImGui::Text("FPS: %.1f", fps);
+        ImGui::End();
+        // Pyramid scale slider
+        ImGui::SetNextWindowPos(ImVec2(10, 60), ImGuiCond_Always);
+        ImGui::SetNextWindowBgAlpha(0.35f);
+        ImGui::Begin("Pyramid Controls", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav);
+        ImGui::SliderFloat("Cone scale", &pyramidScale, 0.1f, 3.0f, "%.2f");
+        ImGui::End();
+        ImGui::Render();
+        // If scale changed, recreate pyramid vertex buffer
+        if (pyramidScale != lastPyramidScale) {
+            if (vertexBuffer) { vertexBuffer->destroy(); delete vertexBuffer; vertexBuffer = nullptr; }
+            createBuffers();
+            lastPyramidScale = pyramidScale;
+        }
         recordCommandBuffer(commandBuffers[imageIndex], imageIndex);
+        // Record ImGui draw data
+        vkResetCommandBuffer(commandBuffers[imageIndex], 0);
+        VkCommandBufferBeginInfo beginInfo{};
+        beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        vkBeginCommandBuffer(commandBuffers[imageIndex], &beginInfo);
+        VkClearValue clearColor = { {0.1f, 0.1f, 0.1f, 1.0f} };
+        VkRenderPassBeginInfo rpInfo{};
+        rpInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+        rpInfo.renderPass = renderPass;
+        rpInfo.framebuffer = framebuffers[imageIndex];
+        rpInfo.renderArea.offset = {0, 0};
+        rpInfo.renderArea.extent = swapchain->getExtent();
+        rpInfo.clearValueCount = 1;
+        rpInfo.pClearValues = &clearColor;
+        vkCmdBeginRenderPass(commandBuffers[imageIndex], &rpInfo, VK_SUBPASS_CONTENTS_INLINE);
+        // Draw grid and pyramid
+        if (gridVertexBuffer && gridIndexBuffer && gridPipeline) {
+            VkBuffer gridVbufs[] = { gridVertexBuffer->getBuffer() };
+            VkDeviceSize gridOffsets[] = { 0 };
+            vkCmdBindPipeline(commandBuffers[imageIndex], VK_PIPELINE_BIND_POINT_GRAPHICS, gridPipeline->getGraphicsPipeline());
+            vkCmdBindVertexBuffers(commandBuffers[imageIndex], 0, 1, gridVbufs, gridOffsets);
+            vkCmdBindIndexBuffer(commandBuffers[imageIndex], gridIndexBuffer->getBuffer(), 0, VK_INDEX_TYPE_UINT16);
+            vkCmdBindDescriptorSets(commandBuffers[imageIndex], VK_PIPELINE_BIND_POINT_GRAPHICS, gridPipeline->getPipelineLayout(), 0, 1, &descriptorSet, 0, nullptr);
+            vkCmdDrawIndexed(commandBuffers[imageIndex], 2 * (20 * 2 + 1) * 2, 1, 0, 0, 0);
+        }
+        if (pipeline) {
+            VkBuffer vbufs[] = { vertexBuffer->getBuffer() };
+            VkDeviceSize offsets[] = { 0 };
+            vkCmdBindPipeline(commandBuffers[imageIndex], VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->getGraphicsPipeline());
+            vkCmdBindVertexBuffers(commandBuffers[imageIndex], 0, 1, vbufs, offsets);
+            vkCmdBindIndexBuffer(commandBuffers[imageIndex], indexBuffer->getBuffer(), 0, VK_INDEX_TYPE_UINT16);
+            vkCmdBindDescriptorSets(commandBuffers[imageIndex], VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->getPipelineLayout(), 0, 1, &descriptorSet, 0, nullptr);
+            vkCmdDrawIndexed(commandBuffers[imageIndex], 18, 1, 0, 0, 0);
+        }
+        // ImGui draw
+        recordImGui(commandBuffers[imageIndex]);
+        vkCmdEndRenderPass(commandBuffers[imageIndex]);
+        vkEndCommandBuffer(commandBuffers[imageIndex]);
         VkSubmitInfo submitInfo{};
         submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
         VkSemaphore waitSemaphores[] = { imageAvailableSemaphores[currentFrame] };
@@ -191,6 +322,7 @@ void VulkanApp::mainLoop() {
 void VulkanApp::handleEvents(bool& running) {
     SDL_Event event;
     while (SDL_PollEvent(&event)) {
+        ImGui_ImplSDL2_ProcessEvent(&event); // Pass events to ImGui
         if (event.type == SDL_QUIT) running = false;
         else if (event.type == SDL_KEYDOWN || event.type == SDL_KEYUP) {
             bool down = (event.type == SDL_KEYDOWN);
@@ -209,16 +341,20 @@ void VulkanApp::handleEvents(bool& running) {
             }
         } else if (event.type == SDL_MOUSEBUTTONDOWN) {
             if (event.button.button == SDL_BUTTON_LEFT && !mouseCaptured) {
-                SDL_SetRelativeMouseMode(SDL_TRUE);
-                mouseCaptured = true;
+                if (!ImGui::GetIO().WantCaptureMouse) {
+                    SDL_SetRelativeMouseMode(SDL_TRUE);
+                    mouseCaptured = true;
+                }
             }
         } else if (event.type == SDL_MOUSEMOTION && mouseCaptured) {
-            float sensitivity = 0.002f;
-            camYaw   += event.motion.xrel * sensitivity;
-            camPitch += event.motion.yrel * sensitivity;
-            // Clamp pitch
-            if (camPitch > 1.5f) camPitch = 1.5f;
-            if (camPitch < -1.5f) camPitch = -1.5f;
+            if (!ImGui::GetIO().WantCaptureMouse) {
+                float sensitivity = 0.002f;
+                camYaw   += event.motion.xrel * sensitivity;
+                camPitch += event.motion.yrel * sensitivity;
+                // Clamp pitch
+                if (camPitch > 1.5f) camPitch = 1.5f;
+                if (camPitch < -1.5f) camPitch = -1.5f;
+            }
         }
     }
 }
@@ -389,13 +525,86 @@ void VulkanApp::recordCommandBuffer(VkCommandBuffer cmd, uint32_t imageIndex) {
     rpInfo.clearValueCount = 1;
     rpInfo.pClearValues = &clearColor;
     vkCmdBeginRenderPass(cmd, &rpInfo, VK_SUBPASS_CONTENTS_INLINE);
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->getGraphicsPipeline());
-    VkBuffer vbufs[] = { vertexBuffer->getBuffer() };
-    VkDeviceSize offsets[] = { 0 };
-    vkCmdBindVertexBuffers(cmd, 0, 1, vbufs, offsets);
-    vkCmdBindIndexBuffer(cmd, indexBuffer->getBuffer(), 0, VK_INDEX_TYPE_UINT16);
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->getPipelineLayout(), 0, 1, &descriptorSet, 0, nullptr);
-    vkCmdDrawIndexed(cmd, 18, 1, 0, 0, 0);
+    // Draw grid (lines)
+    if (gridVertexBuffer && gridIndexBuffer && gridPipeline) {
+        VkBuffer gridVbufs[] = { gridVertexBuffer->getBuffer() };
+        VkDeviceSize gridOffsets[] = { 0 };
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, gridPipeline->getGraphicsPipeline());
+        vkCmdBindVertexBuffers(cmd, 0, 1, gridVbufs, gridOffsets);
+        vkCmdBindIndexBuffer(cmd, gridIndexBuffer->getBuffer(), 0, VK_INDEX_TYPE_UINT16);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, gridPipeline->getPipelineLayout(), 0, 1, &descriptorSet, 0, nullptr);
+        // Grid has 2*(2*gridSize+1)*2 indices
+        vkCmdDrawIndexed(cmd, 2 * (20 * 2 + 1) * 2, 1, 0, 0, 0);
+    }
+    // Draw pyramid
+    if (pipeline) {
+        VkBuffer vbufs[] = { vertexBuffer->getBuffer() };
+        VkDeviceSize offsets[] = { 0 };
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->getGraphicsPipeline());
+        vkCmdBindVertexBuffers(cmd, 0, 1, vbufs, offsets);
+        vkCmdBindIndexBuffer(cmd, indexBuffer->getBuffer(), 0, VK_INDEX_TYPE_UINT16);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->getPipelineLayout(), 0, 1, &descriptorSet, 0, nullptr);
+        vkCmdDrawIndexed(cmd, 18, 1, 0, 0, 0);
+    }
     vkCmdEndRenderPass(cmd);
     vkEndCommandBuffer(cmd);
+}
+
+void VulkanApp::initImGui() {
+    // Create ImGui descriptor pool (large enough for ImGui needs)
+    VkDescriptorPoolSize pool_sizes[] = {
+        { VK_DESCRIPTOR_TYPE_SAMPLER, 1000 },
+        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1000 },
+        { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1000 },
+        { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1000 },
+        { VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, 1000 },
+        { VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, 1000 },
+        { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1000 },
+        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1000 },
+        { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1000 },
+        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, 1000 },
+        { VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, 1000 }
+    };
+    VkDescriptorPoolCreateInfo pool_info = {};
+    pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    pool_info.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+    pool_info.maxSets = 1000 * (uint32_t)(sizeof(pool_sizes)/sizeof(pool_sizes[0]));
+    pool_info.poolSizeCount = (uint32_t)(sizeof(pool_sizes)/sizeof(pool_sizes[0]));
+    pool_info.pPoolSizes = pool_sizes;
+    vkCreateDescriptorPool(vkDevice->getDevice(), &pool_info, nullptr, &imguiPool);
+
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+    ImGuiIO& io = ImGui::GetIO(); (void)io;
+    ImGui::StyleColorsDark();
+    ImGui_ImplSDL2_InitForVulkan(window);
+    ImGui_ImplVulkan_InitInfo init_info = {};
+    init_info.Instance = vkInstance->getInstance();
+    init_info.PhysicalDevice = vkDevice->getPhysicalDevice();
+    init_info.Device = vkDevice->getDevice();
+    init_info.QueueFamily = vkDevice->getGraphicsQueueFamily();
+    init_info.Queue = vkDevice->getGraphicsQueue();
+    init_info.PipelineCache = VK_NULL_HANDLE;
+    init_info.DescriptorPool = imguiPool;
+    init_info.Allocator = nullptr;
+    init_info.MinImageCount = 2;
+    init_info.ImageCount = (uint32_t)swapchain->getImages().size();
+    init_info.CheckVkResultFn = nullptr;
+    init_info.RenderPass = renderPass;
+    ImGui_ImplVulkan_Init(&init_info);
+    // NOTE: ImGui_ImplVulkan_CreateFontsTexture and ImGui_ImplVulkan_DestroyFontUploadObjects are not used or needed in this project. If you see errors referencing them, they are stale or from a previous build. No such calls exist in this file.
+}
+
+void VulkanApp::shutdownImGui() {
+    ImGui_ImplVulkan_Shutdown();
+    ImGui_ImplSDL2_Shutdown();
+    ImGui::DestroyContext();
+    if (imguiPool) {
+        vkDestroyDescriptorPool(vkDevice->getDevice(), imguiPool, nullptr);
+        imguiPool = VK_NULL_HANDLE;
+    }
+}
+
+void VulkanApp::recordImGui(VkCommandBuffer cmd) {
+    ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), cmd);
 }
