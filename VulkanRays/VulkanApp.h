@@ -64,9 +64,6 @@ private:
     double frameAccumulator = 0.0;
     int frameCount = 0;
 
-    // --- Pyramid scale (editable via ImGui) ---
-    float pyramidScale = 1.0f;
-
     void mainLoop();
     void handleEvents(bool& running);
     void createDescriptorSetLayout();

@@ -120,7 +120,7 @@ int VulkanApp::run() {
 
 void VulkanApp::createBuffers() {
     // Pyramid vertices (base at y=0, tip at y=1)
-    float s = pyramidScale;
+    float s = 1.0f;
     Vertex vertices[5] = {
         {{-0.5f * s, 0.0f, -0.5f * s}, {1.0f, 0.0f, 0.0f}},
         {{ 0.5f * s, 0.0f, -0.5f * s}, {0.0f, 1.0f, 0.0f}},
@@ -210,7 +210,6 @@ void VulkanApp::mainLoop() {
     size_t imageCount = swapchain->getImages().size();
     uint32_t currentFrame = 0;
     auto lastTime = std::chrono::high_resolution_clock::now();
-    float lastPyramidScale = pyramidScale;
     while (running) {
         handleEvents(running);
         updateMVPBuffer();
@@ -240,19 +239,7 @@ void VulkanApp::mainLoop() {
         ImGui::Begin("FPS", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav);
         ImGui::Text("FPS: %.1f", fps);
         ImGui::End();
-        // Pyramid scale slider
-        ImGui::SetNextWindowPos(ImVec2(10, 60), ImGuiCond_Always);
-        ImGui::SetNextWindowBgAlpha(0.35f);
-        ImGui::Begin("Pyramid Controls", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav);
-        ImGui::SliderFloat("Cone scale", &pyramidScale, 0.1f, 3.0f, "%.2f");
-        ImGui::End();
         ImGui::Render();
-        // If scale changed, recreate pyramid vertex buffer
-        if (pyramidScale != lastPyramidScale) {
-            if (vertexBuffer) { vertexBuffer->destroy(); delete vertexBuffer; vertexBuffer = nullptr; }
-            createBuffers();
-            lastPyramidScale = pyramidScale;
-        }
         recordCommandBuffer(commandBuffers[imageIndex], imageIndex);
         // Record ImGui draw data
         vkResetCommandBuffer(commandBuffers[imageIndex], 0);
