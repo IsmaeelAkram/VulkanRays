@@ -24,8 +24,18 @@ VulkanBuffer::VulkanBuffer(VulkanDevice& device, VkPhysicalDevice physicalDevice
 }
 
 VulkanBuffer::~VulkanBuffer() {
-    if (buffer) vkDestroyBuffer(device, buffer, nullptr);
-    if (memory) vkFreeMemory(device, memory, nullptr);
+    destroy();
+}
+
+void VulkanBuffer::destroy() {
+    if (buffer) {
+        vkDestroyBuffer(device, buffer, nullptr);
+        buffer = VK_NULL_HANDLE;
+    }
+    if (memory) {
+        vkFreeMemory(device, memory, nullptr);
+        memory = VK_NULL_HANDLE;
+    }
 }
 
 void VulkanBuffer::uploadData(const void* src, VkDeviceSize size) {

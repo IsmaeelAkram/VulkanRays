@@ -6,6 +6,7 @@
 #include "VulkanPipeline.h"
 #include "VulkanBuffer.h"
 #include <chrono>
+#include <vector>
 
 class VulkanApp {
 public:
@@ -29,6 +30,23 @@ private:
     float g_yawAngle = 0.0f;
     bool g_dragging = false;
     int g_lastMouseX = 0, g_lastMouseY = 0;
+
+    // Camera state
+    float camX = 0.0f, camY = 1.0f, camZ = 2.5f; // Camera position
+    float camYaw = 0.0f, camPitch = 0.0f;        // Camera orientation (radians)
+    bool keyW = false, keyA = false, keyS = false, keyD = false; // WASD state
+    bool mouseCaptured = false;
+    int lastMouseX = 0, lastMouseY = 0;
+
+    // --- Vulkan resources ---
+    VkRenderPass renderPass = VK_NULL_HANDLE;
+    std::vector<VkFramebuffer> framebuffers;
+    VkCommandPool commandPool = VK_NULL_HANDLE;
+    std::vector<VkCommandBuffer> commandBuffers;
+    std::vector<VkSemaphore> imageAvailableSemaphores;
+    std::vector<VkSemaphore> renderFinishedSemaphores;
+    std::vector<VkFence> inFlightFences;
+
     void mainLoop();
     void handleEvents(bool& running);
     void createDescriptorSetLayout();
@@ -42,4 +60,5 @@ private:
     void createCommandBuffers();
     void createSyncObjects();
     void recordCommandBuffer(VkCommandBuffer cmd, uint32_t imageIndex);
+    void cleanupVulkanResources();
 };

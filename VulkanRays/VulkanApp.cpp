@@ -11,15 +11,65 @@ struct Vertex {
 
 VulkanApp::VulkanApp() {}
 VulkanApp::~VulkanApp() {
+    if (vkDevice && vkDevice->getDevice()) {
+        vkDeviceWaitIdle(vkDevice->getDevice());
+    }
+    cleanupVulkanResources();
+    if (vertexBuffer) { vertexBuffer->destroy(); delete vertexBuffer; vertexBuffer = nullptr; }
+    if (indexBuffer) { indexBuffer->destroy(); delete indexBuffer; indexBuffer = nullptr; }
+    if (mvpBuffer) { mvpBuffer->destroy(); delete mvpBuffer; mvpBuffer = nullptr; }
     if (pipeline) delete pipeline;
     if (swapchain) delete swapchain;
     if (vkDevice) delete vkDevice;
     if (vkInstance) delete vkInstance;
-    if (vertexBuffer) delete vertexBuffer;
-    if (indexBuffer) delete indexBuffer;
-    if (mvpBuffer) delete mvpBuffer;
     if (window) SDL_DestroyWindow(window);
     SDL_Quit();
+}
+
+void VulkanApp::cleanupVulkanResources() {
+    // Destroy framebuffers
+    for (auto fb : framebuffers) {
+        if (fb) vkDestroyFramebuffer(vkDevice->getDevice(), fb, nullptr);
+    }
+    framebuffers.clear();
+    // Destroy command buffers
+    if (!commandBuffers.empty() && commandPool) {
+        vkFreeCommandBuffers(vkDevice->getDevice(), commandPool, (uint32_t)commandBuffers.size(), commandBuffers.data());
+    }
+    commandBuffers.clear();
+    // Destroy command pool
+    if (commandPool) {
+        vkDestroyCommandPool(vkDevice->getDevice(), commandPool, nullptr);
+        commandPool = VK_NULL_HANDLE;
+    }
+    // Destroy sync objects
+    for (auto s : imageAvailableSemaphores) {
+        if (s) vkDestroySemaphore(vkDevice->getDevice(), s, nullptr);
+    }
+    imageAvailableSemaphores.clear();
+    for (auto s : renderFinishedSemaphores) {
+        if (s) vkDestroySemaphore(vkDevice->getDevice(), s, nullptr);
+    }
+    renderFinishedSemaphores.clear();
+    for (auto f : inFlightFences) {
+        if (f) vkDestroyFence(vkDevice->getDevice(), f, nullptr);
+    }
+    inFlightFences.clear();
+    // Destroy descriptor pool
+    if (descriptorPool) {
+        vkDestroyDescriptorPool(vkDevice->getDevice(), descriptorPool, nullptr);
+        descriptorPool = VK_NULL_HANDLE;
+    }
+    // Destroy descriptor set layout
+    if (descriptorSetLayout) {
+        vkDestroyDescriptorSetLayout(vkDevice->getDevice(), descriptorSetLayout, nullptr);
+        descriptorSetLayout = VK_NULL_HANDLE;
+    }
+    // Destroy render pass
+    if (renderPass) {
+        vkDestroyRenderPass(vkDevice->getDevice(), renderPass, nullptr);
+        renderPass = VK_NULL_HANDLE;
+    }
 }
 
 // --- VulkanApp private members for rendering ---
@@ -100,28 +150,30 @@ void VulkanApp::createBuffers() {
 
 void VulkanApp::mainLoop() {
     bool running = true;
+    size_t imageCount = swapchain->getImages().size();
+    uint32_t currentFrame = 0;
     while (running) {
         handleEvents(running);
         updateMVPBuffer();
-        vkWaitForFences(vkDevice->getDevice(), 1, &inFlightFence, VK_TRUE, UINT64_MAX);
-        vkResetFences(vkDevice->getDevice(), 1, &inFlightFence);
+        vkWaitForFences(vkDevice->getDevice(), 1, &inFlightFences[currentFrame], VK_TRUE, UINT64_MAX);
+        vkResetFences(vkDevice->getDevice(), 1, &inFlightFences[currentFrame]);
         uint32_t imageIndex;
-        vkAcquireNextImageKHR(vkDevice->getDevice(), swapchain->getSwapchain(), UINT64_MAX, imageAvailableSemaphore, VK_NULL_HANDLE, &imageIndex);
+        vkAcquireNextImageKHR(vkDevice->getDevice(), swapchain->getSwapchain(), UINT64_MAX, imageAvailableSemaphores[currentFrame], VK_NULL_HANDLE, &imageIndex);
         vkResetCommandBuffer(commandBuffers[imageIndex], 0);
         recordCommandBuffer(commandBuffers[imageIndex], imageIndex);
         VkSubmitInfo submitInfo{};
         submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-        VkSemaphore waitSemaphores[] = { imageAvailableSemaphore };
+        VkSemaphore waitSemaphores[] = { imageAvailableSemaphores[currentFrame] };
         VkPipelineStageFlags waitStages[] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };
         submitInfo.waitSemaphoreCount = 1;
         submitInfo.pWaitSemaphores = waitSemaphores;
         submitInfo.pWaitDstStageMask = waitStages;
         submitInfo.commandBufferCount = 1;
         submitInfo.pCommandBuffers = &commandBuffers[imageIndex];
-        VkSemaphore signalSemaphores[] = { renderFinishedSemaphore };
+        VkSemaphore signalSemaphores[] = { renderFinishedSemaphores[currentFrame] };
         submitInfo.signalSemaphoreCount = 1;
         submitInfo.pSignalSemaphores = signalSemaphores;
-        if (vkQueueSubmit(vkDevice->getGraphicsQueue(), 1, &submitInfo, inFlightFence) != VK_SUCCESS)
+        if (vkQueueSubmit(vkDevice->getGraphicsQueue(), 1, &submitInfo, inFlightFences[currentFrame]) != VK_SUCCESS)
             throw std::runtime_error("Failed to submit draw command buffer");
         VkPresentInfoKHR presentInfo{};
         presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
@@ -132,6 +184,7 @@ void VulkanApp::mainLoop() {
         presentInfo.pSwapchains = swapchains;
         presentInfo.pImageIndices = &imageIndex;
         vkQueuePresentKHR(vkDevice->getPresentQueue(), &presentInfo);
+        currentFrame = (currentFrame + 1) % imageCount;
     }
 }
 
@@ -139,7 +192,34 @@ void VulkanApp::handleEvents(bool& running) {
     SDL_Event event;
     while (SDL_PollEvent(&event)) {
         if (event.type == SDL_QUIT) running = false;
-        // TODO: Mouse/keyboard controls
+        else if (event.type == SDL_KEYDOWN || event.type == SDL_KEYUP) {
+            bool down = (event.type == SDL_KEYDOWN);
+            switch (event.key.keysym.scancode) {
+                case SDL_SCANCODE_W: keyW = down; break;
+                case SDL_SCANCODE_A: keyA = down; break;
+                case SDL_SCANCODE_S: keyS = down; break;
+                case SDL_SCANCODE_D: keyD = down; break;
+                case SDL_SCANCODE_ESCAPE:
+                    if (down && mouseCaptured) {
+                        SDL_SetRelativeMouseMode(SDL_FALSE);
+                        mouseCaptured = false;
+                    }
+                    break;
+                default: break;
+            }
+        } else if (event.type == SDL_MOUSEBUTTONDOWN) {
+            if (event.button.button == SDL_BUTTON_LEFT && !mouseCaptured) {
+                SDL_SetRelativeMouseMode(SDL_TRUE);
+                mouseCaptured = true;
+            }
+        } else if (event.type == SDL_MOUSEMOTION && mouseCaptured) {
+            float sensitivity = 0.002f;
+            camYaw   += event.motion.xrel * sensitivity;
+            camPitch += event.motion.yrel * sensitivity;
+            // Clamp pitch
+            if (camPitch > 1.5f) camPitch = 1.5f;
+            if (camPitch < -1.5f) camPitch = -1.5f;
+        }
     }
 }
 
@@ -194,12 +274,24 @@ void VulkanApp::createDescriptorSet() {
 void VulkanApp::updateMVPBuffer() {
     int w = (int)swapchain->getExtent().width, h = (int)swapchain->getExtent().height;
     float aspect = w / (float)h;
-    Mat4 proj = perspective(1.0f, aspect, 0.1f, 10.0f);
-    Mat4 view = lookAt(0, 1.0f, 2.5f, 0, 0, 0, 0, 1, 0);
-    float timeSec = 0.0f; // TODO: Animate
-    float totalYaw = timeSec + g_yawAngle;
-    float pitch = g_pitchAngle;
-    Mat4 model = mat4_mul(rotationY(totalYaw), rotationX(pitch));
+    Mat4 proj = perspective(1.0f, aspect, 0.1f, 100.0f);
+
+    // Camera movement
+    float moveSpeed = 0.05f;
+    float forward[3] = { sinf(camYaw) * cosf(camPitch), sinf(camPitch), -cosf(camYaw) * cosf(camPitch) };
+    float right[3] = { cosf(camYaw), 0, sinf(camYaw) };
+    if (keyW) { camX += forward[0] * moveSpeed; camY += forward[1] * moveSpeed; camZ += forward[2] * moveSpeed; }
+    if (keyS) { camX -= forward[0] * moveSpeed; camY -= forward[1] * moveSpeed; camZ -= forward[2] * moveSpeed; }
+    if (keyA) { camX -= right[0] * moveSpeed; camZ -= right[2] * moveSpeed; }
+    if (keyD) { camX += right[0] * moveSpeed; camZ += right[2] * moveSpeed; }
+
+    float eyeX = camX, eyeY = camY, eyeZ = camZ;
+    float centerX = camX + forward[0], centerY = camY + forward[1], centerZ = camZ + forward[2];
+    float upX = 0, upY = 1, upZ = 0;
+    Mat4 view = lookAt(eyeX, eyeY, eyeZ, centerX, centerY, centerZ, upX, upY, upZ);
+
+    Mat4 model = {};
+    for (int i = 0; i < 16; ++i) model.m[i] = (i % 5 == 0) ? 1.0f : 0.0f; // Identity
     Mat4 mvp = mat4_mul(proj, mat4_mul(view, model));
     mvpBuffer->uploadData(&mvp, sizeof(Mat4));
 }
@@ -266,16 +358,22 @@ void VulkanApp::createCommandBuffers() {
         throw std::runtime_error("Failed to allocate command buffers");
 }
 void VulkanApp::createSyncObjects() {
+    size_t imageCount = swapchain->getImages().size();
+    imageAvailableSemaphores.resize(imageCount);
+    renderFinishedSemaphores.resize(imageCount);
+    inFlightFences.resize(imageCount);
     VkSemaphoreCreateInfo semInfo{};
     semInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
-    if (vkCreateSemaphore(vkDevice->getDevice(), &semInfo, nullptr, &imageAvailableSemaphore) != VK_SUCCESS ||
-        vkCreateSemaphore(vkDevice->getDevice(), &semInfo, nullptr, &renderFinishedSemaphore) != VK_SUCCESS)
-        throw std::runtime_error("Failed to create semaphores");
     VkFenceCreateInfo fenceInfo{};
     fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
     fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
-    if (vkCreateFence(vkDevice->getDevice(), &fenceInfo, nullptr, &inFlightFence) != VK_SUCCESS)
-        throw std::runtime_error("Failed to create fence");
+    for (size_t i = 0; i < imageCount; ++i) {
+        if (vkCreateSemaphore(vkDevice->getDevice(), &semInfo, nullptr, &imageAvailableSemaphores[i]) != VK_SUCCESS ||
+            vkCreateSemaphore(vkDevice->getDevice(), &semInfo, nullptr, &renderFinishedSemaphores[i]) != VK_SUCCESS ||
+            vkCreateFence(vkDevice->getDevice(), &fenceInfo, nullptr, &inFlightFences[i]) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create sync objects");
+        }
+    }
 }
 void VulkanApp::recordCommandBuffer(VkCommandBuffer cmd, uint32_t imageIndex) {
     VkCommandBufferBeginInfo beginInfo{};
