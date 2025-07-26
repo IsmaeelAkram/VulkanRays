@@ -7,9 +7,12 @@
 #include "backends/imgui_impl_sdl2.h"
 #include "backends/imgui_impl_vulkan.h"
 #include "RenderObject.h"
+#include <SDL_vulkan.h>
 
 VulkanApp::VulkanApp() {}
 VulkanApp::~VulkanApp() {
+    // Destroy all render objects (and their VulkanBuffers) before device destruction
+    renderObjects.clear();
     if (vkDevice && vkDevice->getDevice()) {
         vkDeviceWaitIdle(vkDevice->getDevice());
     }
@@ -59,11 +62,11 @@ void VulkanApp::cleanupVulkanResources() {
         vkDestroyDescriptorPool(vkDevice->getDevice(), descriptorPool, nullptr);
         descriptorPool = VK_NULL_HANDLE;
     }
-    // Destroy descriptor set layout
-    if (descriptorSetLayout) {
-        vkDestroyDescriptorSetLayout(vkDevice->getDevice(), descriptorSetLayout, nullptr);
-        descriptorSetLayout = VK_NULL_HANDLE;
-    }
+    // Do NOT destroy descriptor set layout here!
+    //if (descriptorSetLayout) {
+    //    vkDestroyDescriptorSetLayout(vkDevice->getDevice(), descriptorSetLayout, nullptr);
+    //    descriptorSetLayout = VK_NULL_HANDLE;
+    //}
     // Destroy render pass
     if (renderPass) {
         vkDestroyRenderPass(vkDevice->getDevice(), renderPass, nullptr);
@@ -170,6 +173,10 @@ void VulkanApp::mainLoop() {
     auto lastTime = std::chrono::high_resolution_clock::now();
     while (running) {
         handleEvents(running);
+        if (framebufferResized) {
+            recreateSwapchain();
+            continue;
+        }
         // Camera movement (was in updateMVPBuffer, now here)
         float moveSpeed = 0.05f;
         float forward[3] = { sinf(camYaw) * cosf(camPitch), sinf(camPitch), -cosf(camYaw) * cosf(camPitch) };
@@ -192,7 +199,13 @@ void VulkanApp::mainLoop() {
         vkWaitForFences(vkDevice->getDevice(), 1, &inFlightFences[currentFrame], VK_TRUE, UINT64_MAX);
         vkResetFences(vkDevice->getDevice(), 1, &inFlightFences[currentFrame]);
         uint32_t imageIndex;
-        vkAcquireNextImageKHR(vkDevice->getDevice(), swapchain->getSwapchain(), UINT64_MAX, imageAvailableSemaphores[currentFrame], VK_NULL_HANDLE, &imageIndex);
+        VkResult acquireResult = vkAcquireNextImageKHR(vkDevice->getDevice(), swapchain->getSwapchain(), UINT64_MAX, imageAvailableSemaphores[currentFrame], VK_NULL_HANDLE, &imageIndex);
+        if (acquireResult == VK_ERROR_OUT_OF_DATE_KHR) {
+            recreateSwapchain();
+            continue;
+        } else if (acquireResult != VK_SUCCESS && acquireResult != VK_SUBOPTIMAL_KHR) {
+            throw std::runtime_error("Failed to acquire swapchain image!");
+        }
         vkResetCommandBuffer(commandBuffers[imageIndex], 0);
         // Start ImGui frame
         ImGui_ImplVulkan_NewFrame();
@@ -205,34 +218,8 @@ void VulkanApp::mainLoop() {
         ImGui::Text("FPS: %.1f", fps);
         ImGui::End();
         ImGui::Render();
+        // Record all drawing (including ImGui) in one command buffer
         recordCommandBuffer(commandBuffers[imageIndex], imageIndex);
-        // Record ImGui draw data
-        vkResetCommandBuffer(commandBuffers[imageIndex], 0);
-        VkCommandBufferBeginInfo beginInfo{};
-        beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-        vkBeginCommandBuffer(commandBuffers[imageIndex], &beginInfo);
-        VkClearValue clearColor = { {0.1f, 0.1f, 0.1f, 1.0f} };
-        VkRenderPassBeginInfo rpInfo{};
-        rpInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-        rpInfo.renderPass = renderPass;
-        rpInfo.framebuffer = framebuffers[imageIndex];
-        rpInfo.renderArea.offset = {0, 0};
-        rpInfo.renderArea.extent = swapchain->getExtent();
-        rpInfo.clearValueCount = 1;
-        rpInfo.pClearValues = &clearColor;
-        vkCmdBeginRenderPass(commandBuffers[imageIndex], &rpInfo, VK_SUBPASS_CONTENTS_INLINE);
-        // Modular: draw all render objects
-        for (auto& obj : renderObjects) {
-            VulkanPipeline* usedPipeline = (obj->getTopology() == VulkanPipeline::Topology::Lines) ? gridPipeline : pipeline;
-            if (usedPipeline) {
-                vkCmdBindPipeline(commandBuffers[imageIndex], VK_PIPELINE_BIND_POINT_GRAPHICS, usedPipeline->getGraphicsPipeline());
-                obj->recordDraw(commandBuffers[imageIndex], usedPipeline->getPipelineLayout(), obj->descriptorSet);
-            }
-        }
-        // ImGui draw
-        recordImGui(commandBuffers[imageIndex]);
-        vkCmdEndRenderPass(commandBuffers[imageIndex]);
-        vkEndCommandBuffer(commandBuffers[imageIndex]);
         VkSubmitInfo submitInfo{};
         submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
         VkSemaphore waitSemaphores[] = { imageAvailableSemaphores[currentFrame] };
@@ -255,7 +242,13 @@ void VulkanApp::mainLoop() {
         presentInfo.swapchainCount = 1;
         presentInfo.pSwapchains = swapchains;
         presentInfo.pImageIndices = &imageIndex;
-        vkQueuePresentKHR(vkDevice->getPresentQueue(), &presentInfo);
+        VkResult presentResult = vkQueuePresentKHR(vkDevice->getPresentQueue(), &presentInfo);
+        if (presentResult == VK_ERROR_OUT_OF_DATE_KHR || presentResult == VK_SUBOPTIMAL_KHR || framebufferResized) {
+            recreateSwapchain();
+            continue;
+        } else if (presentResult != VK_SUCCESS) {
+            throw std::runtime_error("Failed to present swapchain image!");
+        }
         currentFrame = (currentFrame + 1) % imageCount;
     }
 }
@@ -265,6 +258,9 @@ void VulkanApp::handleEvents(bool& running) {
     while (SDL_PollEvent(&event)) {
         ImGui_ImplSDL2_ProcessEvent(&event); // Pass events to ImGui
         if (event.type == SDL_QUIT) running = false;
+        else if (event.type == SDL_WINDOWEVENT && event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
+            framebufferResized = true;
+        }
         else if (event.type == SDL_KEYDOWN || event.type == SDL_KEYUP) {
             bool down = (event.type == SDL_KEYDOWN);
             switch (event.key.keysym.scancode) {
@@ -598,4 +594,34 @@ void VulkanApp::destroyDepthResources() {
         vkFreeMemory(vkDevice->getDevice(), depthImageMemory, nullptr);
         depthImageMemory = VK_NULL_HANDLE;
     }
+}
+
+void VulkanApp::recreateSwapchain() {
+    int width = 0, height = 0;
+    SDL_Vulkan_GetDrawableSize(window, &width, &height);
+    while (width == 0 || height == 0) {
+        SDL_Vulkan_GetDrawableSize(window, &width, &height);
+        SDL_WaitEvent(nullptr);
+    }
+    vkDeviceWaitIdle(vkDevice->getDevice());
+    cleanupVulkanResources();
+    if (swapchain) delete swapchain;
+    swapchain = new VulkanSwapchain(*vkDevice, vkInstance->getSurface(), window);
+    createRenderPass();
+    createDepthResources();
+    createFramebuffers();
+    createCommandPool();
+    createCommandBuffers();
+    createSyncObjects();
+    // --- FIX: Recreate descriptor pool and sets after swapchain recreation ---
+    createDescriptorPool();
+    createDescriptorSet();
+    if (pipeline) { delete pipeline; pipeline = nullptr; }
+    if (gridPipeline) { delete gridPipeline; gridPipeline = nullptr; }
+    pipeline = new VulkanPipeline(vkDevice->getDevice(), swapchain->getExtent(), renderPass, descriptorSetLayout, VulkanPipeline::Topology::Triangles);
+    gridPipeline = new VulkanPipeline(vkDevice->getDevice(), swapchain->getExtent(), renderPass, descriptorSetLayout, VulkanPipeline::Topology::Lines);
+    // Re-init ImGui for new render pass
+    shutdownImGui();
+    initImGui();
+    framebufferResized = false;
 }

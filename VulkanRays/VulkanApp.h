@@ -89,4 +89,6 @@ private:
     void createSyncObjects();
     void recordCommandBuffer(VkCommandBuffer cmd, uint32_t imageIndex);
     void cleanupVulkanResources();
+    void recreateSwapchain();
+    bool framebufferResized = false;
 };
