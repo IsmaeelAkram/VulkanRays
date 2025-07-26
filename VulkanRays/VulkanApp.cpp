@@ -8,6 +8,7 @@
 #include "backends/imgui_impl_vulkan.h"
 #include "RenderObject.h"
 #include <SDL_vulkan.h>
+#include "CoreRendering.h"
 
 VulkanApp::VulkanApp() {}
 VulkanApp::~VulkanApp() {
@@ -32,8 +33,6 @@ void VulkanApp::cleanupVulkanResources() {
         if (fb) vkDestroyFramebuffer(vkDevice->getDevice(), fb, nullptr);
     }
     framebuffers.clear();
-    // Destroy depth resources
-    destroyDepthResources();
     // Destroy command buffers
     if (!commandBuffers.empty() && commandPool) {
         vkFreeCommandBuffers(vkDevice->getDevice(), commandPool, (uint32_t)commandBuffers.size(), commandBuffers.data());
@@ -45,17 +44,9 @@ void VulkanApp::cleanupVulkanResources() {
         commandPool = VK_NULL_HANDLE;
     }
     // Destroy sync objects
-    for (auto s : imageAvailableSemaphores) {
-        if (s) vkDestroySemaphore(vkDevice->getDevice(), s, nullptr);
-    }
+    DestroySyncObjects(vkDevice->getDevice(), syncObjects);
     imageAvailableSemaphores.clear();
-    for (auto s : renderFinishedSemaphores) {
-        if (s) vkDestroySemaphore(vkDevice->getDevice(), s, nullptr);
-    }
     renderFinishedSemaphores.clear();
-    for (auto f : inFlightFences) {
-        if (f) vkDestroyFence(vkDevice->getDevice(), f, nullptr);
-    }
     inFlightFences.clear();
     // Destroy descriptor pools
     if (uboDescriptorPool) {
@@ -70,6 +61,8 @@ void VulkanApp::cleanupVulkanResources() {
         vkDestroyDescriptorPool(vkDevice->getDevice(), descriptorPool, nullptr);
         descriptorPool = VK_NULL_HANDLE;
     }
+    // Modularized: destroy depth resources
+    DestroyDepthResources(vkDevice->getDevice(), depthResources);
     // Do NOT destroy descriptor set layout here!
     //if (descriptorSetLayout) {
     //    vkDestroyDescriptorSetLayout(vkDevice->getDevice(), descriptorSetLayout, nullptr);
@@ -107,13 +100,24 @@ int VulkanApp::run() {
     vkInstance = new VulkanInstance(window, true);
     vkDevice = new VulkanDevice(vkInstance->getInstance(), vkInstance->getSurface());
     swapchain = new VulkanSwapchain(*vkDevice, vkInstance->getSurface(), window);
+    // Create depth resources before render pass/framebuffers
+    depthResources.format = FindSupportedDepthFormat(vkDevice->getPhysicalDevice());
+    CreateDepthResources(
+        vkDevice->getDevice(),
+        vkDevice->getPhysicalDevice(),
+        swapchain->getExtent(),
+        depthResources.format,
+        depthResources,
+        VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT
+    );
     createDescriptorSetLayout();
     createBuffers();
-    createUBODescriptorPool();
-    createSamplerDescriptorPool();
+    // Inline UBO descriptor pool creation
+    CreateUBODescriptorPool(vkDevice->getDevice(), static_cast<uint32_t>(renderObjects.size()), uboDescriptorPool);
+    // Inline sampler descriptor pool creation
+    CreateSamplerDescriptorPool(vkDevice->getDevice(), static_cast<uint32_t>(renderObjects.size()), samplerDescriptorPool);
     createDescriptorSet();
     createRenderPass();
-    createDepthResources();
     createFramebuffers();
     createCommandPool();
     createCommandBuffers();
@@ -359,7 +363,7 @@ void VulkanApp::createRenderPass() {
     colorAttachment.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
 
     VkAttachmentDescription depthAttachment{};
-    depthAttachment.format = findDepthFormat();
+    depthAttachment.format = depthResources.format; // Use modularized depth format
     depthAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
     depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
     depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
@@ -395,8 +399,9 @@ void VulkanApp::createRenderPass() {
 void VulkanApp::createFramebuffers() {
     auto& views = swapchain->getImageViews();
     framebuffers.resize(views.size());
+    VkImageView depthView = depthResources.view;
     for (size_t i = 0; i < views.size(); ++i) {
-        VkImageView attachments[] = { views[i], depthImageView };
+        VkImageView attachments[] = { views[i], depthView };
         VkFramebufferCreateInfo fbInfo{};
         fbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
         fbInfo.renderPass = renderPass;
@@ -428,22 +433,11 @@ void VulkanApp::createCommandBuffers() {
         throw std::runtime_error("Failed to allocate command buffers");
 }
 void VulkanApp::createSyncObjects() {
-    // Use MAX_FRAMES_IN_FLIGHT for triple buffering
-    imageAvailableSemaphores.resize(MAX_FRAMES_IN_FLIGHT);
-    renderFinishedSemaphores.resize(MAX_FRAMES_IN_FLIGHT);
-    inFlightFences.resize(MAX_FRAMES_IN_FLIGHT);
-    VkSemaphoreCreateInfo semInfo{};
-    semInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
-    VkFenceCreateInfo fenceInfo{};
-    fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-    fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
-    for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
-        if (vkCreateSemaphore(vkDevice->getDevice(), &semInfo, nullptr, &imageAvailableSemaphores[i]) != VK_SUCCESS ||
-            vkCreateSemaphore(vkDevice->getDevice(), &semInfo, nullptr, &renderFinishedSemaphores[i]) != VK_SUCCESS ||
-            vkCreateFence(vkDevice->getDevice(), &fenceInfo, nullptr, &inFlightFences[i]) != VK_SUCCESS) {
-            throw std::runtime_error("Failed to create sync objects");
-        }
-    }
+    syncObjects = {};
+    CreateSyncObjects(vkDevice->getDevice(), MAX_FRAMES_IN_FLIGHT, syncObjects);
+    imageAvailableSemaphores = syncObjects.imageAvailableSemaphores;
+    renderFinishedSemaphores = syncObjects.renderFinishedSemaphores;
+    inFlightFences = syncObjects.inFlightFences;
 }
 void VulkanApp::recordCommandBuffer(VkCommandBuffer cmd, uint32_t imageIndex) {
     VkCommandBufferBeginInfo beginInfo{};
@@ -544,78 +538,6 @@ void VulkanApp::recordImGui(VkCommandBuffer cmd) {
     ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), cmd);
 }
 
-VkFormat VulkanApp::findDepthFormat() {
-    const VkFormat candidates[] = {
-        VK_FORMAT_D32_SFLOAT,
-        VK_FORMAT_D32_SFLOAT_S8_UINT,
-        VK_FORMAT_D24_UNORM_S8_UINT
-    };
-    for (VkFormat format : candidates) {
-        VkFormatProperties props;
-        vkGetPhysicalDeviceFormatProperties(vkDevice->getPhysicalDevice(), format, &props);
-        if (props.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT)
-            return format;
-    }
-    throw std::runtime_error("Failed to find supported depth format");
-}
-
-void VulkanApp::createDepthResources() {
-    depthFormat = findDepthFormat();
-    VkExtent2D extent = swapchain->getExtent();
-    VkImageCreateInfo imageInfo{};
-    imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-    imageInfo.imageType = VK_IMAGE_TYPE_2D;
-    imageInfo.extent.width = extent.width;
-    imageInfo.extent.height = extent.height;
-    imageInfo.extent.depth = 1;
-    imageInfo.mipLevels = 1;
-    imageInfo.arrayLayers = 1;
-    imageInfo.format = depthFormat;
-    imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-    imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    imageInfo.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
-    imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
-    imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-    if (vkCreateImage(vkDevice->getDevice(), &imageInfo, nullptr, &depthImage) != VK_SUCCESS)
-        throw std::runtime_error("Failed to create depth image");
-    VkMemoryRequirements memRequirements;
-    vkGetImageMemoryRequirements(vkDevice->getDevice(), depthImage, &memRequirements);
-    VkMemoryAllocateInfo allocInfo{};
-    allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    allocInfo.allocationSize = memRequirements.size;
-    allocInfo.memoryTypeIndex = vkDevice->findMemoryType(memRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-    if (vkAllocateMemory(vkDevice->getDevice(), &allocInfo, nullptr, &depthImageMemory) != VK_SUCCESS)
-        throw std::runtime_error("Failed to allocate depth image memory");
-    vkBindImageMemory(vkDevice->getDevice(), depthImage, depthImageMemory, 0);
-    VkImageViewCreateInfo viewInfo{};
-    viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-    viewInfo.image = depthImage;
-    viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-    viewInfo.format = depthFormat;
-    viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
-    viewInfo.subresourceRange.baseMipLevel = 0;
-    viewInfo.subresourceRange.levelCount = 1;
-    viewInfo.subresourceRange.baseArrayLayer = 0;
-    viewInfo.subresourceRange.layerCount = 1;
-    if (vkCreateImageView(vkDevice->getDevice(), &viewInfo, nullptr, &depthImageView) != VK_SUCCESS)
-        throw std::runtime_error("Failed to create depth image view");
-}
-
-void VulkanApp::destroyDepthResources() {
-    if (depthImageView) {
-        vkDestroyImageView(vkDevice->getDevice(), depthImageView, nullptr);
-        depthImageView = VK_NULL_HANDLE;
-    }
-    if (depthImage) {
-        vkDestroyImage(vkDevice->getDevice(), depthImage, nullptr);
-        depthImage = VK_NULL_HANDLE;
-    }
-    if (depthImageMemory) {
-        vkFreeMemory(vkDevice->getDevice(), depthImageMemory, nullptr);
-        depthImageMemory = VK_NULL_HANDLE;
-    }
-}
-
 void VulkanApp::recreateSwapchain() {
     int width = 0, height = 0;
     SDL_Vulkan_GetDrawableSize(window, &width, &height);
@@ -625,54 +547,35 @@ void VulkanApp::recreateSwapchain() {
     }
     vkDeviceWaitIdle(vkDevice->getDevice());
     cleanupVulkanResources();
+    SwapchainResources swapRes;
+    swapRes.swapchain = swapchain ? swapchain->getSwapchain() : VK_NULL_HANDLE;
+    swapRes.imageFormat = swapchain ? swapchain->getImageFormat() : VK_FORMAT_UNDEFINED;
+    swapRes.extent = swapchain ? swapchain->getExtent() : VkExtent2D{(uint32_t)width, (uint32_t)height};
     if (swapchain) delete swapchain;
     swapchain = new VulkanSwapchain(*vkDevice, vkInstance->getSurface(), window);
+    // Recreate depth resources after swapchain recreation
+    depthResources.format = FindSupportedDepthFormat(vkDevice->getPhysicalDevice());
+    CreateDepthResources(
+        vkDevice->getDevice(),
+        vkDevice->getPhysicalDevice(),
+        swapchain->getExtent(),
+        depthResources.format,
+        depthResources,
+        VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT
+    );
+    CreateUBODescriptorPool(vkDevice->getDevice(), static_cast<uint32_t>(renderObjects.size()), uboDescriptorPool);
+    CreateSamplerDescriptorPool(vkDevice->getDevice(), static_cast<uint32_t>(renderObjects.size()), samplerDescriptorPool);
+    createDescriptorPool();
+    createDescriptorSet();
     createRenderPass();
-    createDepthResources();
     createFramebuffers();
     createCommandPool();
     createCommandBuffers();
-    createSyncObjects();
-    // --- FIX: Recreate descriptor pools and sets after swapchain recreation ---
-    createUBODescriptorPool();
-    createSamplerDescriptorPool();
-    createDescriptorPool();
-    createDescriptorSet();
     if (pipeline) { delete pipeline; pipeline = nullptr; }
     if (gridPipeline) { delete gridPipeline; gridPipeline = nullptr; }
     pipeline = new VulkanPipeline(vkDevice->getDevice(), swapchain->getExtent(), renderPass, descriptorSetLayout, VulkanPipeline::Topology::Triangles);
     gridPipeline = new VulkanPipeline(vkDevice->getDevice(), swapchain->getExtent(), renderPass, descriptorSetLayout, VulkanPipeline::Topology::Lines);
-    // Re-init ImGui for new render pass
     shutdownImGui();
     initImGui();
     framebufferResized = false;
-}
-
-// Implement separate creation functions for UBO and sampler descriptor pools
-
-void VulkanApp::createUBODescriptorPool() {
-    size_t numObjects = renderObjects.size();
-    VkDescriptorPoolSize poolSize{};
-    poolSize.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    poolSize.descriptorCount = static_cast<uint32_t>(numObjects);
-    VkDescriptorPoolCreateInfo poolInfo{};
-    poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    poolInfo.poolSizeCount = 1;
-    poolInfo.pPoolSizes = &poolSize;
-    poolInfo.maxSets = static_cast<uint32_t>(numObjects);
-    if (vkCreateDescriptorPool(vkDevice->getDevice(), &poolInfo, nullptr, &uboDescriptorPool) != VK_SUCCESS)
-        throw std::runtime_error("Failed to create UBO descriptor pool");
-}
-
-void VulkanApp::createSamplerDescriptorPool() {
-    VkDescriptorPoolSize poolSize{};
-    poolSize.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    poolSize.descriptorCount = 32; // Arbitrary, adjust as needed
-    VkDescriptorPoolCreateInfo poolInfo{};
-    poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    poolInfo.poolSizeCount = 1;
-    poolInfo.pPoolSizes = &poolSize;
-    poolInfo.maxSets = 32;
-    if (vkCreateDescriptorPool(vkDevice->getDevice(), &poolInfo, nullptr, &samplerDescriptorPool) != VK_SUCCESS)
-        throw std::runtime_error("Failed to create sampler descriptor pool");
 }

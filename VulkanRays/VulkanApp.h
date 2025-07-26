@@ -9,6 +9,7 @@
 #include <vector>
 #include <memory>
 #include "RenderObject.h"
+#include "CoreRendering.h"
 // ImGui forward declarations
 struct ImGui_ImplVulkan_InitInfo;
 
@@ -51,18 +52,11 @@ private:
     std::vector<VkSemaphore> imageAvailableSemaphores;
     std::vector<VkSemaphore> renderFinishedSemaphores;
     std::vector<VkFence> inFlightFences;
-    // Add a constant for max frames in flight (triple buffering)
     static constexpr int MAX_FRAMES_IN_FLIGHT = 3;
 
-    // --- Depth resources ---
-    VkImage depthImage = VK_NULL_HANDLE;
-    VkDeviceMemory depthImageMemory = VK_NULL_HANDLE;
-    VkImageView depthImageView = VK_NULL_HANDLE;
-    VkFormat depthFormat = VK_FORMAT_UNDEFINED;
-
-    VkFormat findDepthFormat();
-    void createDepthResources();
-    void destroyDepthResources();
+    // --- Depth resources (modularized) ---
+    DepthResources depthResources;
+    SyncObjects syncObjects;
 
     // --- ImGui integration ---
     VkDescriptorPool imguiPool = VK_NULL_HANDLE;
@@ -94,7 +88,5 @@ private:
     void recordCommandBuffer(VkCommandBuffer cmd, uint32_t imageIndex);
     void cleanupVulkanResources();
     void recreateSwapchain();
-    void createUBODescriptorPool();
-    void createSamplerDescriptorPool();
     bool framebufferResized = false;
 };

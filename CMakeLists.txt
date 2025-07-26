@@ -26,7 +26,7 @@ set(IMGUI_SOURCES
 )
 
 # — Executable —
-add_executable(VulkanRays ${SOURCES} ${IMGUI_SOURCES})
+add_executable(VulkanRays ${SOURCES} ${IMGUI_SOURCES} "VulkanRays/CoreRendering.cpp" "VulkanRays/CoreRendering.h")
 
 # — Include dirs —
 target_include_directories(VulkanRays PRIVATE
