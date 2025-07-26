@@ -50,6 +50,16 @@ private:
     std::vector<VkSemaphore> renderFinishedSemaphores;
     std::vector<VkFence> inFlightFences;
 
+    // --- Depth resources ---
+    VkImage depthImage = VK_NULL_HANDLE;
+    VkDeviceMemory depthImageMemory = VK_NULL_HANDLE;
+    VkImageView depthImageView = VK_NULL_HANDLE;
+    VkFormat depthFormat = VK_FORMAT_UNDEFINED;
+
+    VkFormat findDepthFormat();
+    void createDepthResources();
+    void destroyDepthResources();
+
     // --- ImGui integration ---
     VkDescriptorPool imguiPool = VK_NULL_HANDLE;
     void initImGui();

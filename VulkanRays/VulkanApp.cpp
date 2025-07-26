@@ -29,6 +29,8 @@ void VulkanApp::cleanupVulkanResources() {
         if (fb) vkDestroyFramebuffer(vkDevice->getDevice(), fb, nullptr);
     }
     framebuffers.clear();
+    // Destroy depth resources
+    destroyDepthResources();
     // Destroy command buffers
     if (!commandBuffers.empty() && commandPool) {
         vkFreeCommandBuffers(vkDevice->getDevice(), commandPool, (uint32_t)commandBuffers.size(), commandBuffers.data());
@@ -96,6 +98,7 @@ int VulkanApp::run() {
     createDescriptorPool();
     createDescriptorSet();
     createRenderPass();
+    createDepthResources();
     createFramebuffers();
     createCommandPool();
     createCommandBuffers();
@@ -338,17 +341,36 @@ void VulkanApp::createRenderPass() {
     colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
     colorAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     colorAttachment.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+
+    VkAttachmentDescription depthAttachment{};
+    depthAttachment.format = findDepthFormat();
+    depthAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+    depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    depthAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    depthAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    depthAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    depthAttachment.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
     VkAttachmentReference colorAttachmentRef{};
     colorAttachmentRef.attachment = 0;
     colorAttachmentRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+    VkAttachmentReference depthAttachmentRef{};
+    depthAttachmentRef.attachment = 1;
+    depthAttachmentRef.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
     VkSubpassDescription subpass{};
     subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
     subpass.colorAttachmentCount = 1;
     subpass.pColorAttachments = &colorAttachmentRef;
+    subpass.pDepthStencilAttachment = &depthAttachmentRef;
+
+    VkAttachmentDescription attachments[2] = { colorAttachment, depthAttachment };
     VkRenderPassCreateInfo renderPassInfo{};
     renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-    renderPassInfo.attachmentCount = 1;
-    renderPassInfo.pAttachments = &colorAttachment;
+    renderPassInfo.attachmentCount = 2;
+    renderPassInfo.pAttachments = attachments;
     renderPassInfo.subpassCount = 1;
     renderPassInfo.pSubpasses = &subpass;
     if (vkCreateRenderPass(vkDevice->getDevice(), &renderPassInfo, nullptr, &renderPass) != VK_SUCCESS)
@@ -358,11 +380,11 @@ void VulkanApp::createFramebuffers() {
     auto& views = swapchain->getImageViews();
     framebuffers.resize(views.size());
     for (size_t i = 0; i < views.size(); ++i) {
-        VkImageView attachments[] = { views[i] };
+        VkImageView attachments[] = { views[i], depthImageView };
         VkFramebufferCreateInfo fbInfo{};
         fbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
         fbInfo.renderPass = renderPass;
-        fbInfo.attachmentCount = 1;
+        fbInfo.attachmentCount = 2;
         fbInfo.pAttachments = attachments;
         fbInfo.width = swapchain->getExtent().width;
         fbInfo.height = swapchain->getExtent().height;
@@ -411,15 +433,17 @@ void VulkanApp::recordCommandBuffer(VkCommandBuffer cmd, uint32_t imageIndex) {
     VkCommandBufferBeginInfo beginInfo{};
     beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     vkBeginCommandBuffer(cmd, &beginInfo);
-    VkClearValue clearColor = { {0.1f, 0.1f, 0.1f, 1.0f} };
+    VkClearValue clearValues[2];
+    clearValues[0].color = { {0.1f, 0.1f, 0.1f, 1.0f} };
+    clearValues[1].depthStencil = { 1.0f, 0 };
     VkRenderPassBeginInfo rpInfo{};
     rpInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
     rpInfo.renderPass = renderPass;
     rpInfo.framebuffer = framebuffers[imageIndex];
     rpInfo.renderArea.offset = {0, 0};
     rpInfo.renderArea.extent = swapchain->getExtent();
-    rpInfo.clearValueCount = 1;
-    rpInfo.pClearValues = &clearColor;
+    rpInfo.clearValueCount = 2;
+    rpInfo.pClearValues = clearValues;
     vkCmdBeginRenderPass(cmd, &rpInfo, VK_SUBPASS_CONTENTS_INLINE);
     // Modular: draw all render objects
     int w = (int)swapchain->getExtent().width, h = (int)swapchain->getExtent().height;
@@ -502,4 +526,76 @@ void VulkanApp::shutdownImGui() {
 
 void VulkanApp::recordImGui(VkCommandBuffer cmd) {
     ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), cmd);
+}
+
+VkFormat VulkanApp::findDepthFormat() {
+    const VkFormat candidates[] = {
+        VK_FORMAT_D32_SFLOAT,
+        VK_FORMAT_D32_SFLOAT_S8_UINT,
+        VK_FORMAT_D24_UNORM_S8_UINT
+    };
+    for (VkFormat format : candidates) {
+        VkFormatProperties props;
+        vkGetPhysicalDeviceFormatProperties(vkDevice->getPhysicalDevice(), format, &props);
+        if (props.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT)
+            return format;
+    }
+    throw std::runtime_error("Failed to find supported depth format");
+}
+
+void VulkanApp::createDepthResources() {
+    depthFormat = findDepthFormat();
+    VkExtent2D extent = swapchain->getExtent();
+    VkImageCreateInfo imageInfo{};
+    imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    imageInfo.imageType = VK_IMAGE_TYPE_2D;
+    imageInfo.extent.width = extent.width;
+    imageInfo.extent.height = extent.height;
+    imageInfo.extent.depth = 1;
+    imageInfo.mipLevels = 1;
+    imageInfo.arrayLayers = 1;
+    imageInfo.format = depthFormat;
+    imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+    imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    imageInfo.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+    imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+    imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    if (vkCreateImage(vkDevice->getDevice(), &imageInfo, nullptr, &depthImage) != VK_SUCCESS)
+        throw std::runtime_error("Failed to create depth image");
+    VkMemoryRequirements memRequirements;
+    vkGetImageMemoryRequirements(vkDevice->getDevice(), depthImage, &memRequirements);
+    VkMemoryAllocateInfo allocInfo{};
+    allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocInfo.allocationSize = memRequirements.size;
+    allocInfo.memoryTypeIndex = vkDevice->findMemoryType(memRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    if (vkAllocateMemory(vkDevice->getDevice(), &allocInfo, nullptr, &depthImageMemory) != VK_SUCCESS)
+        throw std::runtime_error("Failed to allocate depth image memory");
+    vkBindImageMemory(vkDevice->getDevice(), depthImage, depthImageMemory, 0);
+    VkImageViewCreateInfo viewInfo{};
+    viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    viewInfo.image = depthImage;
+    viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    viewInfo.format = depthFormat;
+    viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+    viewInfo.subresourceRange.baseMipLevel = 0;
+    viewInfo.subresourceRange.levelCount = 1;
+    viewInfo.subresourceRange.baseArrayLayer = 0;
+    viewInfo.subresourceRange.layerCount = 1;
+    if (vkCreateImageView(vkDevice->getDevice(), &viewInfo, nullptr, &depthImageView) != VK_SUCCESS)
+        throw std::runtime_error("Failed to create depth image view");
+}
+
+void VulkanApp::destroyDepthResources() {
+    if (depthImageView) {
+        vkDestroyImageView(vkDevice->getDevice(), depthImageView, nullptr);
+        depthImageView = VK_NULL_HANDLE;
+    }
+    if (depthImage) {
+        vkDestroyImage(vkDevice->getDevice(), depthImage, nullptr);
+        depthImage = VK_NULL_HANDLE;
+    }
+    if (depthImageMemory) {
+        vkFreeMemory(vkDevice->getDevice(), depthImageMemory, nullptr);
+        depthImageMemory = VK_NULL_HANDLE;
+    }
 }
