@@ -57,7 +57,15 @@ void VulkanApp::cleanupVulkanResources() {
         if (f) vkDestroyFence(vkDevice->getDevice(), f, nullptr);
     }
     inFlightFences.clear();
-    // Destroy descriptor pool
+    // Destroy descriptor pools
+    if (uboDescriptorPool) {
+        vkDestroyDescriptorPool(vkDevice->getDevice(), uboDescriptorPool, nullptr);
+        uboDescriptorPool = VK_NULL_HANDLE;
+    }
+    if (samplerDescriptorPool) {
+        vkDestroyDescriptorPool(vkDevice->getDevice(), samplerDescriptorPool, nullptr);
+        samplerDescriptorPool = VK_NULL_HANDLE;
+    }
     if (descriptorPool) {
         vkDestroyDescriptorPool(vkDevice->getDevice(), descriptorPool, nullptr);
         descriptorPool = VK_NULL_HANDLE;
@@ -83,6 +91,9 @@ VkSemaphore imageAvailableSemaphore = VK_NULL_HANDLE;
 VkSemaphore renderFinishedSemaphore = VK_NULL_HANDLE;
 VkFence inFlightFence = VK_NULL_HANDLE;
 
+// Add a constant for max frames in flight (triple buffering)
+constexpr int MAX_FRAMES_IN_FLIGHT = 3;
+
 int VulkanApp::run() {
     if (SDL_Init(SDL_INIT_VIDEO) != 0) {
         std::cerr << "SDL Init Error: " << SDL_GetError() << "\n";
@@ -98,7 +109,8 @@ int VulkanApp::run() {
     swapchain = new VulkanSwapchain(*vkDevice, vkInstance->getSurface(), window);
     createDescriptorSetLayout();
     createBuffers();
-    createDescriptorPool();
+    createUBODescriptorPool();
+    createSamplerDescriptorPool();
     createDescriptorSet();
     createRenderPass();
     createDepthResources();
@@ -145,7 +157,7 @@ void VulkanApp::createDescriptorSet() {
         );
         VkDescriptorSetAllocateInfo allocInfo{};
         allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-        allocInfo.descriptorPool = descriptorPool;
+        allocInfo.descriptorPool = uboDescriptorPool; // Use UBO pool
         allocInfo.descriptorSetCount = 1;
         allocInfo.pSetLayouts = &descriptorSetLayout;
         if (vkAllocateDescriptorSets(vkDevice->getDevice(), &allocInfo, &obj->descriptorSet) != VK_SUCCESS)
@@ -196,10 +208,17 @@ void VulkanApp::mainLoop() {
             frameAccumulator = 0.0;
             frameCount = 0;
         }
+        // Wait for the fence for this frame to be signaled before reusing resources
         vkWaitForFences(vkDevice->getDevice(), 1, &inFlightFences[currentFrame], VK_TRUE, UINT64_MAX);
         vkResetFences(vkDevice->getDevice(), 1, &inFlightFences[currentFrame]);
         uint32_t imageIndex;
-        VkResult acquireResult = vkAcquireNextImageKHR(vkDevice->getDevice(), swapchain->getSwapchain(), UINT64_MAX, imageAvailableSemaphores[currentFrame], VK_NULL_HANDLE, &imageIndex);
+        VkResult acquireResult = vkAcquireNextImageKHR(
+            vkDevice->getDevice(),
+            swapchain->getSwapchain(),
+            UINT64_MAX,
+            imageAvailableSemaphores[currentFrame],
+            VK_NULL_HANDLE,
+            &imageIndex);
         if (acquireResult == VK_ERROR_OUT_OF_DATE_KHR) {
             recreateSwapchain();
             continue;
@@ -249,7 +268,8 @@ void VulkanApp::mainLoop() {
         } else if (presentResult != VK_SUCCESS) {
             throw std::runtime_error("Failed to present swapchain image!");
         }
-        currentFrame = (currentFrame + 1) % imageCount;
+        // Advance to next frame in flight
+        currentFrame = (currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
     }
 }
 
@@ -408,16 +428,16 @@ void VulkanApp::createCommandBuffers() {
         throw std::runtime_error("Failed to allocate command buffers");
 }
 void VulkanApp::createSyncObjects() {
-    size_t imageCount = swapchain->getImages().size();
-    imageAvailableSemaphores.resize(imageCount);
-    renderFinishedSemaphores.resize(imageCount);
-    inFlightFences.resize(imageCount);
+    // Use MAX_FRAMES_IN_FLIGHT for triple buffering
+    imageAvailableSemaphores.resize(MAX_FRAMES_IN_FLIGHT);
+    renderFinishedSemaphores.resize(MAX_FRAMES_IN_FLIGHT);
+    inFlightFences.resize(MAX_FRAMES_IN_FLIGHT);
     VkSemaphoreCreateInfo semInfo{};
     semInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
     VkFenceCreateInfo fenceInfo{};
     fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
     fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
-    for (size_t i = 0; i < imageCount; ++i) {
+    for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
         if (vkCreateSemaphore(vkDevice->getDevice(), &semInfo, nullptr, &imageAvailableSemaphores[i]) != VK_SUCCESS ||
             vkCreateSemaphore(vkDevice->getDevice(), &semInfo, nullptr, &renderFinishedSemaphores[i]) != VK_SUCCESS ||
             vkCreateFence(vkDevice->getDevice(), &fenceInfo, nullptr, &inFlightFences[i]) != VK_SUCCESS) {
@@ -613,7 +633,9 @@ void VulkanApp::recreateSwapchain() {
     createCommandPool();
     createCommandBuffers();
     createSyncObjects();
-    // --- FIX: Recreate descriptor pool and sets after swapchain recreation ---
+    // --- FIX: Recreate descriptor pools and sets after swapchain recreation ---
+    createUBODescriptorPool();
+    createSamplerDescriptorPool();
     createDescriptorPool();
     createDescriptorSet();
     if (pipeline) { delete pipeline; pipeline = nullptr; }
@@ -624,4 +646,33 @@ void VulkanApp::recreateSwapchain() {
     shutdownImGui();
     initImGui();
     framebufferResized = false;
+}
+
+// Implement separate creation functions for UBO and sampler descriptor pools
+
+void VulkanApp::createUBODescriptorPool() {
+    size_t numObjects = renderObjects.size();
+    VkDescriptorPoolSize poolSize{};
+    poolSize.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    poolSize.descriptorCount = static_cast<uint32_t>(numObjects);
+    VkDescriptorPoolCreateInfo poolInfo{};
+    poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    poolInfo.poolSizeCount = 1;
+    poolInfo.pPoolSizes = &poolSize;
+    poolInfo.maxSets = static_cast<uint32_t>(numObjects);
+    if (vkCreateDescriptorPool(vkDevice->getDevice(), &poolInfo, nullptr, &uboDescriptorPool) != VK_SUCCESS)
+        throw std::runtime_error("Failed to create UBO descriptor pool");
+}
+
+void VulkanApp::createSamplerDescriptorPool() {
+    VkDescriptorPoolSize poolSize{};
+    poolSize.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    poolSize.descriptorCount = 32; // Arbitrary, adjust as needed
+    VkDescriptorPoolCreateInfo poolInfo{};
+    poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    poolInfo.poolSizeCount = 1;
+    poolInfo.pPoolSizes = &poolSize;
+    poolInfo.maxSets = 32;
+    if (vkCreateDescriptorPool(vkDevice->getDevice(), &poolInfo, nullptr, &samplerDescriptorPool) != VK_SUCCESS)
+        throw std::runtime_error("Failed to create sampler descriptor pool");
 }

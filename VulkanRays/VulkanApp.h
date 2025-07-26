@@ -28,6 +28,8 @@ private:
     VkDescriptorSetLayout descriptorSetLayout = VK_NULL_HANDLE;
     VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
     VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
+    VkDescriptorPool uboDescriptorPool = VK_NULL_HANDLE; // Pool for UBOs
+    VkDescriptorPool samplerDescriptorPool = VK_NULL_HANDLE; // Pool for samplers
     std::chrono::steady_clock::time_point startTime;
     float g_pitchAngle = 0.0f;
     float g_yawAngle = 0.0f;
@@ -49,6 +51,8 @@ private:
     std::vector<VkSemaphore> imageAvailableSemaphores;
     std::vector<VkSemaphore> renderFinishedSemaphores;
     std::vector<VkFence> inFlightFences;
+    // Add a constant for max frames in flight (triple buffering)
+    static constexpr int MAX_FRAMES_IN_FLIGHT = 3;
 
     // --- Depth resources ---
     VkImage depthImage = VK_NULL_HANDLE;
@@ -90,5 +94,7 @@ private:
     void recordCommandBuffer(VkCommandBuffer cmd, uint32_t imageIndex);
     void cleanupVulkanResources();
     void recreateSwapchain();
+    void createUBODescriptorPool();
+    void createSamplerDescriptorPool();
     bool framebufferResized = false;
 };
