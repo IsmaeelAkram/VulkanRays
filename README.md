@@ -150,7 +150,6 @@ cmake --build . --config Release
 
 ## Known issues / TODO
 
-* No proper staging + async uploads yet (kept it straightforward).
 * No descriptor indexing or bindless; one set per object is fine at this scale.
 * No frustum culling or multi-threaded recording (future experiment).
 * SSAO/lighting would be fun next; this is unlit color for clarity.
