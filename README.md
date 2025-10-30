@@ -2,8 +2,6 @@
 
 VulkanRays is a compact educational 3D renderer implemented with Vulkan. It demonstrates a small but complete Vulkan application pipeline: instance & device creation, swapchain and depth setup, pipeline creation, per-object buffers and descriptors, command buffer recording, synchronization, ImGui integration, and a simple camera and scene made of procedural geometry (grid + pyramids).
 
-This README focuses on what the engine contains and explains the key 3D engine features implemented in the codebase. Sections about contributing or licensing have been removed.
-
 Table of contents
 - Quick summary
 - Features (what you added)
