@@ -16,7 +16,7 @@ I built this as a student project to demystify Vulkan by wiring everything mysel
 * WASD + mouselook camera
 * Clean teardown and safe swapchain recreation on resize
 
-Tested on **Windows 10 (RTX)** and **Arch Linux (Wayland/Hyprland, Mesa/Vulkan 1.3)**.
+Tested on **Windows 10 (RTX)**, **Arch Linux (Wayland/Hyprland, Mesa/Vulkan 1.3)**, and **MacOS (Apple Metal)**.
 
 ---
 
