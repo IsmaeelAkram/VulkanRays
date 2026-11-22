@@ -20,6 +20,7 @@ VulkanApp::~VulkanApp() {
     cleanupVulkanResources();
     if (pipeline) delete pipeline;
     if (gridPipeline) delete gridPipeline;
+    if (descriptorSetLayout) vkDestroyDescriptorSetLayout(vkDevice->getDevice(), descriptorSetLayout, nullptr);
     if (swapchain) delete swapchain;
     if (vkDevice) delete vkDevice;
     if (vkInstance) delete vkInstance;
@@ -127,6 +128,8 @@ int VulkanApp::run() {
     gridPipeline = new VulkanPipeline(vkDevice->getDevice(), swapchain->getExtent(), renderPass, descriptorSetLayout, VulkanPipeline::Topology::Lines);
     initImGui();
     mainLoop();
+    // Let the last frames finish before ImGui and the render objects free buffers they still use
+    vkDeviceWaitIdle(vkDevice->getDevice());
     shutdownImGui();
     return 0;
 }
@@ -152,6 +155,7 @@ void VulkanApp::createBuffers() {
 
 void VulkanApp::createDescriptorSet() {
     for (auto& obj : renderObjects) {
+        delete obj->mvpBuffer; // recreateSwapchain() calls this again; free the previous buffer
         obj->mvpBuffer = new VulkanBuffer(
             *vkDevice,
             vkDevice->getPhysicalDevice(),
@@ -475,6 +479,7 @@ void VulkanApp::recordCommandBuffer(VkCommandBuffer cmd, uint32_t imageIndex) {
             obj->recordDraw(cmd, usedPipeline->getPipelineLayout(), obj->descriptorSet);
         }
     }
+    recordImGui(cmd);
     vkCmdEndRenderPass(cmd);
     vkEndCommandBuffer(cmd);
 }
@@ -571,6 +576,7 @@ void VulkanApp::recreateSwapchain() {
     createFramebuffers();
     createCommandPool();
     createCommandBuffers();
+    createSyncObjects(); // cleanupVulkanResources() destroyed them
     if (pipeline) { delete pipeline; pipeline = nullptr; }
     if (gridPipeline) { delete gridPipeline; gridPipeline = nullptr; }
     pipeline = new VulkanPipeline(vkDevice->getDevice(), swapchain->getExtent(), renderPass, descriptorSetLayout, VulkanPipeline::Topology::Triangles);
