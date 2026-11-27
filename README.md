@@ -1,175 +1,97 @@
 # VulkanRays
 
-A tiny 3D renderer I wrote to learn Vulkan the “real” way—no helper frameworks, just SDL2 + Vulkan + ImGui. It draws a procedural scene (grid + pyramids), has a first-person camera, and shows the full life cycle: instance/device, swapchain + depth, pipelines, per-object UBOs, command buffers, and synchronization.
+A small C++17 Vulkan renderer with SDL2 and Dear ImGui.
 
-I built this as a student project to demystify Vulkan by wiring everything myself and documenting the choices (and mistakes) along the way.
+![The camera circles three vertex-colored pyramids on a line grid, with an FPS counter in the top-left corner.](docs/media/vr-hero-loop.gif)
 
----
+*Three pyramids on a line grid, with the Dear ImGui FPS overlay in the corner.*
 
-## Quick summary
+## Features
 
-* Minimal but complete Vulkan app
-* Two pipelines (triangles for meshes, lines for the grid)
-* Per-object UBOs (MVP) using descriptor sets
-* Per-frame command buffers + fences/semaphores (triple-buffered)
-* ImGui overlay for FPS and toggles
-* WASD + mouselook camera
-* Clean teardown and safe swapchain recreation on resize
+- Matrix math (`perspective`, `lookAt`, axis rotations, `mat4_mul`) written by hand in `MathUtils`, with no math library. Each object's model-view-projection matrix is rebuilt every frame and copied into its own uniform buffer.
+- Scene objects are `RenderObject`s. Each one owns its vertex and index buffers, its uniform buffer and descriptor set, and records its own draw.
+- Two graphics pipelines in one render pass: triangles for the pyramids and a line list for the grid.
+- Depth testing, with a depth attachment on the render pass.
+- Up to three frames in flight (`MAX_FRAMES_IN_FLIGHT = 3`), each with its own fence and pair of semaphores.
+- Swapchain rebuild on window resize or `VK_ERROR_OUT_OF_DATE_KHR`, including the depth image, framebuffers and pipelines.
+- Dear ImGui FPS overlay drawn on top of the scene.
+- SPIR-V for both shaders embedded in the binary as byte arrays.
+- Validation layer always enabled. The app won't start if `VK_LAYER_KHRONOS_validation` isn't installed.
 
-Tested on **Windows 11 (RTX)**, **Arch Linux (Wayland/Hyprland, Mesa/Vulkan 1.3)**, and **MacOS (Apple Metal)**.
+## Requirements
 
----
+- The [Vulkan SDK](https://vulkan.lunarg.com/sdk/home), with `VULKAN_SDK` set to its install path. CMake stops if it isn't set. The SDK also provides the validation layer.
+- SDL2. On Windows, CMake expects SDL2's headers and libraries inside the Vulkan SDK (`%VULKAN_SDK%\Include\SDL2` and `%VULKAN_SDK%\Lib\SDL2.lib`).
+- CMake 3.8 or newer, Ninja, and a C++17 compiler.
 
-## Why I built it
+Dear ImGui is included in `imgui/` along with its SDL2 and Vulkan backends.
 
-I kept bouncing between “big engine” codebases and toy samples that hid the hard parts. VulkanRays sits in the middle: small enough to read in an evening, but explicit enough to show what actually happens each frame. If you’re learning Vulkan, this is the level of detail I wish I’d found sooner.
+## Build and run
 
----
+### Windows
 
-## Features I implemented (and why)
-
-1. **Validation + debug messenger**
-   Turn on `VK_LAYER_KHRONOS_validation` and print messages to stderr. This saved me from a *lot* of foot-guns (wrong image layouts, missing barriers, etc.).
-
-2. **Device + queues selection**
-   Picks a device that supports graphics + present and caches the family indices. Also includes a tiny `findMemoryType` helper because memory flags are easy to mess up.
-
-3. **Swapchain + depth with safe recreation**
-   Chooses formats/present mode, creates image views, a depth image/view, and tears it all down/rebuilds on `VK_ERROR_OUT_OF_DATE_KHR`. Resize is a first-class citizen.
-
-4. **Two graphics pipelines**
-   One pipeline for triangles (pyramids) and one for lines (grid). Different primitive topologies, same render pass. Keeps state obvious instead of shoving toggles everywhere.
-
-5. **Per-object UBOs via descriptor sets**
-   Each renderable gets its own UBO (MVP). I update right before issuing the draw. It’s simple and keeps the shaders clean while I’m learning.
-
-6. **Procedural geometry**
-
-   * **Grid**: generated line segments on the fly.
-   * **Pyramid**: tiny indexed triangle mesh.
-     Both exercise vertex/index buffers and show how to add your own objects.
-
-7. **Command buffer recording per frame**
-   Allocate one primary CB per swapchain image, begin render pass, draw objects, then hand over to ImGui’s Vulkan backend, and submit with per-frame sync objects.
-
-8. **ImGui overlay (SDL2 + Vulkan backends)**
-   Handy for FPS, toggles, and quick params without writing a UI system.
-
-9. **Deterministic cleanup**
-   Everything created is destroyed. I wait on device idle in the right places so swapchain recreation doesn’t implode.
-
----
-
-## What the code looks like
+From a Visual Studio developer prompt (the presets use `cl.exe`):
 
 ```
-/src
-  VulkanApp.*          // app loop, input, recordCommandBuffer, swapchain recreate
-  VulkanInstance.*     // instance + debug messenger + surface
-  VulkanDevice.*       // physical device pick, logical device, queues, memory helper
-  VulkanPipeline.*     // pipeline creation (triangles | lines), shader modules
-  RenderObject.*       // GridObject, PyramidObject, per-object UBO, recordDraw()
-  CoreRendering.*      // depth resources, descriptor pool, sync objects
-  MathUtils.*          // perspective(), lookAt(), rotations, mat4 ops
-/shaders
-  triangle.vert/frag   // compiled to SPIR-V and embedded as .inc
+cmake --preset x64-release
+cmake --build out/build/x64-release
+out\build\x64-release\VulkanRays.exe
 ```
 
----
+Use `x64-debug` for a debug build.
 
-## Build & run
+### Other platforms
 
-**Dependencies**
+`CMakeLists.txt` falls back to `find_library` for Vulkan and SDL2, but its include paths assume the Windows SDK layout (`$VULKAN_SDK/Include/SDL2`), so you may need to point them at your SDL2 headers first. Then:
 
-* Vulkan SDK (LunarG). Make sure validation layers are installed.
-* SDL2 with Vulkan support.
-* ImGui sources + SDL2/Vulkan backends (included/linked by the project).
-* CMake + a C++17 compiler.
-* (Optional) `glslc` if you recompile shaders.
-
-**Typical**
-
-```bash
-# From project root
-mkdir build && cd build
-cmake -G "Ninja" -DCMAKE_BUILD_TYPE=Release ..
-cmake --build . --config Release
-./VulkanRays   # or build/bin/VulkanRays on your toolchain
+```
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+./build/VulkanRays
 ```
 
-**Shaders**
+### Shaders
 
-* I embed SPIR-V as `.inc` arrays. If you edit GLSL, run your compile step (e.g. `glslc triangle.vert -o triangle.vert.spv`) and rebuild the `.inc` headers (simple Python/CMake step in the project).
-* Alternatively, swap the pipeline loader to read `.spv` files at runtime.
+The GLSL is in `VulkanRays/shaders/`. The compiled SPIR-V is checked in, both as `.spv` files and as the `.inc` byte arrays that `VulkanPipeline.cpp` includes, so this step is only needed after changing a shader.
 
----
+From `VulkanRays/shaders`, run `build_shaders.bat`. It compiles the shaders with `glslangValidator` (part of the Vulkan SDK) and regenerates the `.inc` files with `xxd -i`, so both need to be on your `PATH`. Then rebuild.
 
 ## Controls
 
-* **W/A/S/D** — move
-* **Mouse** — look (capture with LMB, release with **Esc**)
-* **Resize window** — triggers swapchain recreation
-* **ImGui** — FPS overlay (top-left)
+| Input | Action |
+| --- | --- |
+| W / S | Move forward and back along the view direction |
+| A / D | Strafe left and right |
+| Left click | Capture the mouse for mouse look |
+| Esc | Release the mouse |
 
----
+Close the window to quit.
 
-## Implementation notes (where to look)
+## Project layout
 
-* **App flow**: `VulkanApp::run`, `mainLoop`, `recordCommandBuffer`
-* **Init**: `VulkanInstance.*`, `VulkanDevice.*`
-* **Swapchain/depth**: `CoreRendering.*` + `VulkanApp::recreateSwapchain`
-* **Pipelines**: `VulkanPipeline.*` (topology enum)
-* **Objects**: `RenderObject.*` (`recordDraw`, per-object UBO)
-* **Math**: `MathUtils.*` (`perspective`, `lookAt`, rotations)
+```
+VulkanRays/
+  VulkanRays.cpp      main(): creates the VulkanApp and runs it
+  VulkanApp.*         window, main loop, input, render pass, command recording, ImGui, swapchain rebuild
+  VulkanInstance.*    instance, validation layer, debug messenger, surface
+  VulkanDevice.*      physical device choice, logical device, queues, memory type lookup
+  VulkanSwapchain.*   swapchain and image views
+  VulkanPipeline.*    shader modules and the two pipelines (triangles, lines)
+  VulkanBuffer.*      buffers and their memory, uploads, destroy()
+  RenderObject.*      RenderObject base class, PyramidObject, GridObject
+  CoreRendering.*     depth resources, sync objects, descriptor pools, swapchain helpers
+  MathUtils.*         Mat4, perspective, lookAt, rotations, mat4_mul
+  shaders/            triangle.vert and triangle.frag, compiled .spv and .inc, build_shaders.bat
+imgui/                Dear ImGui 1.92.1 with the SDL2 and Vulkan backends
+```
 
----
+## Known limitations
 
-## Troubleshooting (stuff I broke so you don’t have to)
+- No textures or lighting. Every surface is interpolated vertex color.
+- `perspective()` uses OpenGL's clip-space conventions (Y up, depth from -1 to 1) rather than Vulkan's (Y down, depth from 0 to 1). The pyramid's vertex data and the mouse pitch are flipped to compensate.
 
-* **Validation spam / crashes**
-  Make sure the Vulkan SDK is installed and the validation layer is available. If not, disable validation or fix your SDK install.
+## Credits
 
-* **`VK_ERROR_OUT_OF_DATE_KHR` on present**
-  That’s normal after a resize or alt-tab. The app recreates the swapchain. If you changed windowing code, double-check you’re waiting on the device in the right spots.
-
-* **“Missing shaders” / includes not found**
-  If `.inc` files aren’t generated, compile GLSL → SPIR-V and rebuild the `.inc`. Or switch to loading `.spv` at runtime.
-
-* **No Vulkan device**
-  Update GPU drivers and confirm a working ICD (e.g., `vulkaninfo` on Linux).
-
----
-
-## Design choices (and alternatives I considered)
-
-* **Per-object UBOs**: simple and explicit for a small scene. For bigger scenes I’d move to a ring buffer or dynamic UBOs/SSBOs.
-* **Two pipelines vs. toggling topology**: separate pipelines keep state immutable and closer to Vulkan’s design.
-* **Embedded SPIR-V**: fewer runtime dependencies. If hot-reloading shaders is your thing, switch to `.spv` file IO.
-
----
-
-## Known issues / TODO
-
-* No descriptor indexing or bindless; one set per object is fine at this scale.
-* No frustum culling or multi-threaded recording (future experiment).
-* SSAO/lighting would be fun next; this is unlit color for clarity.
-
----
-
-## FAQ
-
-**Why Vulkan instead of OpenGL?**
-I wanted to understand modern explicit APIs: synchronization, memory, and pipeline state. Once those clicked, everything else felt less magical.
-
-**Why SDL2?**
-It gives me windows + input + Vulkan surfaces without dragging in a full engine.
-
-**Can I add my own mesh?**
-Yes—copy `PyramidObject` as a template: create vertex/index buffers, add a per-object UBO, and implement `recordDraw()`.
-
----
-
-## Acknowledgments
-
-* Khronos Vulkan tutorial/docs, Sascha Willems samples, and countless validation messages that humbled me.
-* ImGui for saving me from writing a UI.
+- [Khronos Vulkan Tutorial](https://docs.vulkan.org/tutorial/latest/00_Introduction.html), which the setup order follows.
+- [SDL2](https://www.libsdl.org/) for the window and input.
+- [Dear ImGui](https://github.com/ocornut/imgui) for the overlay.
